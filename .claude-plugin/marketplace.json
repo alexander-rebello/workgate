@@ -1,0 +1,15 @@
+{
+  "name": "workgate",
+  "owner": {
+    "name": "Alexander Rebello"
+  },
+  "plugins": [
+    {
+      "name": "workgate",
+      "source": "./",
+      "description": "Gate every change behind a claimed work item with worktrees, a verified merge flow and session hooks.",
+      "version": "0.1.0"
+    }
+  ],
+  "description": "Workgate: gate every change behind a claimed work item."
+}
