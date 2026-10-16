@@ -507,6 +507,7 @@ export async function doneItem(repo: Repo, id: number, options: DoneOptions): Pr
       await git(repo.mainRoot, ['branch', '-d', branch]);
       clearLease(repo, id);
       log.push('removed worktree and branch');
+      log.push(`The worktree is gone; continue from ${repo.mainRoot}.`);
       return { item: next, log };
     } catch (error) {
       await gitOk(repo.mainRoot, ['merge', '--abort']);

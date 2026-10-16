@@ -133,6 +133,7 @@ describe('done', () => {
     repo.write('feature.txt', 'hello', wt);
     const out = repo.wgOk(['done', String(id), '--outcome', 'added feature', '--report', 'Users can now see the feature'], wt);
     expect(out).toContain('merged');
+    expect(out).toContain(`continue from ${repo.dir}`);
     expect(repo.read('feature.txt')).toBe('hello');
     expect(existsSync(wt)).toBe(false);
     expect(repo.git(['branch', '--list', '1-*'])).toBe('');
