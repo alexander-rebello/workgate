@@ -17,12 +17,12 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          registry-url: https://registry.npmjs.org
+      - name: npm with trusted publishing support (needs 11.5.1+)
+        run: npm install --global npm@latest
       - run: git config --global user.email ci@example.com && git config --global user.name ci
       - run: pnpm install --frozen-lockfile
       - run: pnpm run verify
       - name: tag must match package.json version
         run: test "v$(node -p "require('./package.json').version")" = "$GITHUB_REF_NAME"
-      - run: npm publish --access public --provenance
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # Authenticates through GitHub OIDC (npm trusted publisher); no token is stored.
+      - run: npm publish --access public
