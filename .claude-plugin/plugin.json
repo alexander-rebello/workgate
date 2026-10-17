@@ -1,10 +1,17 @@
 {
   "name": "workgate",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Gate every change behind a claimed work item: file-backed items, per-item worktrees, a verified merge flow, and hooks that keep sessions on the rails.",
-  "author": { "name": "Alexander Rebello" },
+  "author": {
+    "name": "Alexander Rebello"
+  },
   "homepage": "https://github.com/alexander-rebello/workgate",
   "repository": "https://github.com/alexander-rebello/workgate",
   "license": "MIT",
-  "keywords": ["todo", "worktree", "workflow", "hooks"]
+  "keywords": [
+    "todo",
+    "worktree",
+    "workflow",
+    "hooks"
+  ]
 }
