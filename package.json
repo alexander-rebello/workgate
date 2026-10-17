@@ -23,7 +23,8 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src test",
     "test": "vitest run",
-    "verify": "pnpm run typecheck && pnpm run lint && pnpm run build && pnpm run test"
+    "verify": "pnpm run typecheck && pnpm run lint && pnpm run build && pnpm run test",
+    "version": "node scripts/sync-version.mjs && git add .claude-plugin"
   },
   "license": "MIT",
   "dependencies": {
