@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { existsSync, readFileSync, appendFileSync, writeFileSync, mkdirSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import picomatch from 'picomatch';
 import { nextItems, planProgress } from './derive.js';
 import { WgError } from './errors.js';
@@ -291,6 +291,68 @@ export async function itemForToplevel(repo: Repo, toplevel: string): Promise<Ite
   const info = list.find((w) => w.path === toplevel);
   if (info?.branch === undefined) return undefined;
   return items.find((i) => i.meta.status === 'active' && i.meta.branch === info.branch);
+}
+
+async function worktreeItem(repo: Repo, cwd: string): Promise<Item> {
+  const item = await requireItemForCwd(repo, cwd);
+  const info = await worktreeOfBranch(repo, item.meta.branch ?? '');
+  if (info === undefined) throw new WgError(`Worktree for #${item.meta.id} not found.`);
+  const file = join(info.path, repo.config.todosDir, basename(item.file));
+  if (!existsSync(file)) throw new WgError(`${file} not found in the worktree.`);
+  return parseItem(readFileSync(file, 'utf8'), file);
+}
+
+export interface PlanStep {
+  n: number;
+  checked: boolean;
+  text: string;
+}
+
+const STEP = /^(\s*- \[)([ xX])(\] ?)(.*)$/;
+
+export function planSteps(body: string): PlanStep[] {
+  const steps: PlanStep[] = [];
+  for (const line of body.split('\n')) {
+    const m = STEP.exec(line);
+    if (m !== null) steps.push({ n: steps.length + 1, checked: m[2] !== ' ', text: m[4] ?? '' });
+  }
+  return steps;
+}
+
+/** The body is read from and written to the item's worktree copy; the frontmatter is never touched. */
+export async function readBody(repo: Repo, cwd: string): Promise<string> {
+  return (await worktreeItem(repo, cwd)).body;
+}
+
+export async function setBody(repo: Repo, cwd: string, body: string): Promise<void> {
+  const item = await worktreeItem(repo, cwd);
+  writeItem(item, item.meta, body);
+  touchLease(repo, item.meta.id);
+}
+
+export async function markSteps(
+  repo: Repo,
+  cwd: string,
+  numbers: readonly number[],
+  checked: boolean,
+): Promise<{ done: number; total: number }> {
+  const item = await worktreeItem(repo, cwd);
+  const total = planSteps(item.body).length;
+  for (const n of numbers) {
+    if (!Number.isInteger(n) || n < 1 || n > total) throw new WgError(`#${item.meta.id} has no plan step ${n} (${total} step(s)).`);
+  }
+  const wanted = new Set(numbers);
+  let seen = 0;
+  const lines = item.body.split('\n').map((line) => {
+    const m = STEP.exec(line);
+    if (m === null) return line;
+    seen += 1;
+    return wanted.has(seen) ? `${m[1] ?? ''}${checked ? 'x' : ' '}${m[3] ?? ''}${m[4] ?? ''}` : line;
+  });
+  const body = lines.join('\n');
+  writeItem(item, item.meta, body);
+  touchLease(repo, item.meta.id);
+  return planProgress(body);
 }
 
 export async function checkpoint(repo: Repo, cwd: string, message: string | undefined): Promise<string> {

@@ -1,9 +1,9 @@
 import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { dirname, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { endBypass, startBypass } from './bypass.js';
 import { currentItemText, digestText, rulesText } from './context.js';
-import { mutatingGit, touchesProtectedState } from './guard.js';
+import { mutatingGit, touchesProtectedState, writesProtectedPaths } from './guard.js';
 import { loadAll } from './items.js';
 import { itemForToplevel } from './ops.js';
 import { tryResolveRepo } from './repo.js';
@@ -62,6 +62,19 @@ function nearestExistingDir(path: string): string {
   return dir;
 }
 
+const ITEM_FILES_HELP =
+  'Workgate: item files and the index are read-only for agents. Edit the plan with wg plan check|uncheck <n> or wg body --set (stdin); change status with the wg commands.';
+
+function itemFilePaths(repo: Repo): string[] {
+  return [repo.config.todosDir, repo.config.indexFile];
+}
+
+function isItemFile(repo: Repo, abs: string): boolean {
+  const rel = relative(repo.toplevel, abs);
+  if (rel.startsWith('..')) return false;
+  return rel === repo.config.indexFile || rel === repo.config.todosDir || rel.startsWith(`${repo.config.todosDir}/`);
+}
+
 const NO_ITEM_HELP =
   'Workgate: this change is not covered by an active item. Run: wg add "<title>" --kind <kind>, then wg claim <id>, and edit inside the printed worktree. The owner can skip this with a [quick] prompt.';
 
@@ -73,6 +86,7 @@ async function gateWrite(input: HookInput): Promise<HookOutput | undefined> {
   if (/\/\.git\/workgate(\/|$)/.test(abs)) return deny('Workgate state is managed by the owner and the wg tool only.');
   const repo = await tryResolveRepo(nearestExistingDir(abs));
   if (repo === undefined) return undefined;
+  if (isItemFile(repo, abs)) return deny(ITEM_FILES_HELP);
   if (bypassActive(repo, input.session_id)) return undefined;
   const item = await itemForToplevel(repo, repo.toplevel);
   if (item !== undefined) return undefined;
@@ -87,6 +101,7 @@ async function gateBash(input: HookInput): Promise<HookOutput | undefined> {
   if (touchesProtectedState(command)) {
     return deny('Only the owner may manage workgate bypass or its state; run it yourself with the ! prefix.');
   }
+  if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
   const mutating = mutatingGit(command);
   if (mutating.length === 0) return undefined;
   if (bypassActive(repo, input.session_id)) {

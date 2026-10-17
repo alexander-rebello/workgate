@@ -287,3 +287,51 @@ describe('stale detection and doctor', () => {
     expect(r.out).toContain('done items require outcome');
   });
 });
+
+describe('plan and body editing', () => {
+  const BODY = 'Context line.\n\n- [ ] first step\n- [ ] second step\n- [ ] third step';
+
+  function claimWithPlan(): string {
+    add('Planned');
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    expect(repo.wg(['body', '--set'], wt, BODY).code).toBe(0);
+    return wt;
+  }
+
+  it('sets the body of the worktree copy only and leaves frontmatter alone', () => {
+    const wt = claimWithPlan();
+    const wtFile = repo.read('docs/todos/0001-planned.md', wt);
+    expect(wtFile).toContain('- [ ] second step');
+    expect(wtFile).toContain('status: active');
+    expect(repo.read('docs/todos/0001-planned.md')).not.toContain('second step');
+    expect(repo.wgOk(['body'], wt)).toContain('first step');
+  });
+
+  it('checks and unchecks plan steps by number and shows numbered progress', () => {
+    const wt = claimWithPlan();
+    expect(repo.wgOk(['plan', 'check', '1', '3'], wt)).toContain('2/3');
+    const out = repo.wgOk(['plan'], wt);
+    expect(out).toContain('1. [x] first step');
+    expect(out).toContain('2. [ ] second step');
+    expect(out).toContain('3. [x] third step');
+    expect(repo.wgOk(['plan', 'uncheck', '1'], wt)).toContain('1/3');
+    expect(repo.read('docs/todos/0001-planned.md', wt)).toContain('- [ ] first step');
+  });
+
+  it('rejects unknown step numbers and a body outside an item worktree', () => {
+    const wt = claimWithPlan();
+    const bad = repo.wg(['plan', 'check', '9'], wt);
+    expect(bad.code).not.toBe(0);
+    expect(bad.err).toContain('step 9');
+    expect(repo.wg(['body', '--set'], repo.dir, 'x').code).not.toBe(0);
+  });
+
+  it('carries the plan through checkpoint and done', () => {
+    const wt = claimWithPlan();
+    repo.wgOk(['plan', 'check', '1'], wt);
+    repo.write('f.txt', 'x', wt);
+    repo.wgOk(['checkpoint', 'work'], wt);
+    repo.wgOk(['done', '--outcome', 'ok', '--no-report'], wt);
+    expect(repo.read('docs/todos/0001-planned.md')).toContain('status: done');
+  });
+});

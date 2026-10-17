@@ -15,6 +15,10 @@ import {
   doctor,
   doneItem,
   dropItem,
+  markSteps,
+  planSteps,
+  readBody,
+  setBody,
   releaseItem,
   requireItemForCwd,
   resumeItem,
@@ -327,6 +331,41 @@ program
   .action(async (message: string | undefined) => {
     print(await checkpoint(await repoForCwd(), process.cwd(), message));
   });
+
+program
+  .command('body')
+  .description("Print the current item's body, or replace it from stdin with --set")
+  .option('--set', 'replace the body with stdin')
+  .action(async (opts: { set?: boolean }) => {
+    const repo = await repoForCwd();
+    if (opts.set === true) {
+      const text = await readStdin();
+      if (text.trim() === '') throw new WgError('Refusing to set an empty body; pipe the new body on stdin.');
+      await setBody(repo, process.cwd(), text);
+      print('Body updated.');
+    } else {
+      print(await readBody(repo, process.cwd()));
+    }
+  });
+
+const plan = program.command('plan').description("Show or tick the current item's plan checklist").action(async () => {
+  const body = await readBody(await repoForCwd(), process.cwd());
+  const steps = planSteps(body);
+  if (steps.length === 0) print('No plan steps. Add "- [ ] step" lines with wg body --set.');
+  for (const s of steps) print(`${s.n}. [${s.checked ? 'x' : ' '}] ${s.text}`);
+});
+
+for (const [name, checked] of [['check', true], ['uncheck', false]] as const) {
+  plan
+    .command(name)
+    .description(`Mark plan steps ${checked ? 'done' : 'open'} by number`)
+    .argument('<numbers...>', 'step numbers as listed by wg plan')
+    .action(async (numbers: string[]) => {
+      const nums = numbers.map((n) => Number(n));
+      const progress = await markSteps(await repoForCwd(), process.cwd(), nums, checked);
+      print(`Plan: ${progress.done}/${progress.total}`);
+    });
+}
 
 program
   .command('sync')

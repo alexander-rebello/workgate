@@ -32863,7 +32863,7 @@ async function readStdin() {
 
 // src/hooks.ts
 import { existsSync as existsSync5 } from "node:fs";
-import { dirname as dirname4, resolve as resolve2 } from "node:path";
+import { dirname as dirname4, relative as relative4, resolve as resolve2 } from "node:path";
 
 // src/context.ts
 function rulesText(repo) {
@@ -32874,12 +32874,12 @@ function rulesText(repo) {
     "Workgate is active in this repository. Work items are files in " + c.todosDir + "/; the index " + c.indexFile + " is generated.",
     "- Anything that changes files must belong to an item. Read-only questions need none.",
     `- No item yet? Run: wg add "<title>" --kind bug|feature|rework|decision   then: wg claim <id>. Claim prints a worktree path; edit files only inside it.`,
-    "- Keep the plan as a checklist (- [ ] / - [x]) in your worktree copy of the item file body.",
+    "- Keep the plan as a checklist in the item body: write it with wg body --set (reads stdin), tick steps with wg plan check <n...> (wg plan lists them numbered). Item files and the index are read-only for you.",
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,
     "- Rebase conflicts: resolve the files, then wg sync <id> --continue (or --abort), then wg done again.",
     '- Blocked on the owner (decision, information, approval, access)? Run: wg block <id> --needs "<exactly what you need>" and tell the owner.',
-    "- Never edit item frontmatter or the index by hand; always use wg.",
+    "- Edits to item files and the index are denied everywhere, in worktrees too; always go through wg.",
     "- The owner can skip this flow for one prompt by starting it with [quick]. You cannot enable that yourself."
   ].join("\n");
 }
@@ -32903,8 +32903,8 @@ function digestText(repo, items) {
 }
 function currentItemText(item) {
   const progress = planProgress(item.body);
-  const plan = progress.total === 0 ? "no plan checklist yet" : `plan ${progress.done}/${progress.total}`;
-  return `This working directory belongs to active item #${item.meta.id} "${item.meta.title}" (${plan}).`;
+  const plan2 = progress.total === 0 ? "no plan checklist yet" : `plan ${progress.done}/${progress.total}`;
+  return `This working directory belongs to active item #${item.meta.id} "${item.meta.title}" (${plan2}).`;
 }
 
 // src/guard.ts
@@ -33172,12 +33172,39 @@ function touchesProtectedState(command) {
     return idx !== -1 && words[idx + 1] === "bypass" && words[idx + 2] !== "status";
   });
 }
+var FILE_WRITERS = /* @__PURE__ */ new Set(["tee", "mv", "cp", "rm", "truncate", "install", "ln", "dd", "rsync", "patch"]);
+var IN_PLACE_EDITORS = /* @__PURE__ */ new Set(["sed", "perl", "ruby"]);
+var INTERPRETERS = /^(python[\d.]*|node|ruby|perl|php|deno|bun)$/;
+function basename0(words) {
+  return (words[0] ?? "").split("/").pop() ?? "";
+}
+function escapeRegex2(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function writesProtectedPaths(command, paths) {
+  if (paths.length === 0) return false;
+  const alternatives = paths.map(escapeRegex2).join("|");
+  if (new RegExp(`>>?\\s*['"]?[^\\s'"]*(${alternatives})`).test(command)) return true;
+  return splitCommands(command).some((segment) => {
+    let words = segment;
+    while (WRAPPERS.has(basename0(words))) words = words.slice(1);
+    const name = basename0(words);
+    if (SHELLS.has(name)) {
+      const idx = words.findIndex((w) => /^-[a-z]*c$/.test(w));
+      const script = idx === -1 ? void 0 : words[idx + 1];
+      if (script !== void 0) return writesProtectedPaths(script, paths);
+    }
+    if (!words.some((w) => paths.some((p) => w.includes(p)))) return false;
+    if (FILE_WRITERS.has(name) || INTERPRETERS.test(name)) return true;
+    return IN_PLACE_EDITORS.has(name) && words.some((w) => /^-[a-zA-Z]*i/.test(w) || w === "--in-place");
+  });
+}
 
 // src/ops.ts
 var import_picomatch = __toESM(require_picomatch2(), 1);
 import { execFile as execFile2 } from "node:child_process";
 import { existsSync as existsSync4, readFileSync as readFileSync4, appendFileSync, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4 } from "node:fs";
-import { dirname as dirname3, join as join5, relative as relative3 } from "node:path";
+import { basename as basename2, dirname as dirname3, join as join5, relative as relative3 } from "node:path";
 
 // src/repo.ts
 import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
@@ -33360,8 +33387,8 @@ async function resumeItem(repo, id) {
       throw new WgError(`The worktree for #${id} (${item.meta.branch}) no longer exists. Release it with "wg release ${id}".`);
     }
     touchLease(repo, id);
-    const worktreeItem = join5(info.path, item.file.slice(repo.mainRoot.length + 1));
-    const body = existsSync4(worktreeItem) ? parseItem(readFileSync4(worktreeItem, "utf8"), worktreeItem).body : item.body;
+    const worktreeItem2 = join5(info.path, item.file.slice(repo.mainRoot.length + 1));
+    const body = existsSync4(worktreeItem2) ? parseItem(readFileSync4(worktreeItem2, "utf8"), worktreeItem2).body : item.body;
     return { item, worktree: info.path, branch: item.meta.branch, resumed: true, progress: planProgress(body) };
   });
 }
@@ -33456,6 +33483,50 @@ async function itemForToplevel(repo, toplevel) {
   const info = list.find((w) => w.path === toplevel);
   if (info?.branch === void 0) return void 0;
   return items.find((i) => i.meta.status === "active" && i.meta.branch === info.branch);
+}
+async function worktreeItem(repo, cwd) {
+  const item = await requireItemForCwd(repo, cwd);
+  const info = await worktreeOfBranch(repo, item.meta.branch ?? "");
+  if (info === void 0) throw new WgError(`Worktree for #${item.meta.id} not found.`);
+  const file2 = join5(info.path, repo.config.todosDir, basename2(item.file));
+  if (!existsSync4(file2)) throw new WgError(`${file2} not found in the worktree.`);
+  return parseItem(readFileSync4(file2, "utf8"), file2);
+}
+var STEP = /^(\s*- \[)([ xX])(\] ?)(.*)$/;
+function planSteps(body) {
+  const steps = [];
+  for (const line2 of body.split("\n")) {
+    const m = STEP.exec(line2);
+    if (m !== null) steps.push({ n: steps.length + 1, checked: m[2] !== " ", text: m[4] ?? "" });
+  }
+  return steps;
+}
+async function readBody(repo, cwd) {
+  return (await worktreeItem(repo, cwd)).body;
+}
+async function setBody(repo, cwd, body) {
+  const item = await worktreeItem(repo, cwd);
+  writeItem(item, item.meta, body);
+  touchLease(repo, item.meta.id);
+}
+async function markSteps(repo, cwd, numbers, checked) {
+  const item = await worktreeItem(repo, cwd);
+  const total = planSteps(item.body).length;
+  for (const n of numbers) {
+    if (!Number.isInteger(n) || n < 1 || n > total) throw new WgError(`#${item.meta.id} has no plan step ${n} (${total} step(s)).`);
+  }
+  const wanted = new Set(numbers);
+  let seen = 0;
+  const lines = item.body.split("\n").map((line2) => {
+    const m = STEP.exec(line2);
+    if (m === null) return line2;
+    seen += 1;
+    return wanted.has(seen) ? `${m[1] ?? ""}${checked ? "x" : " "}${m[3] ?? ""}${m[4] ?? ""}` : line2;
+  });
+  const body = lines.join("\n");
+  writeItem(item, item.meta, body);
+  touchLease(repo, item.meta.id);
+  return planProgress(body);
 }
 async function checkpoint(repo, cwd, message) {
   const item = await requireItemForCwd(repo, cwd);
@@ -33744,6 +33815,15 @@ function nearestExistingDir(path2) {
   while (!existsSync5(dir) && dirname4(dir) !== dir) dir = dirname4(dir);
   return dir;
 }
+var ITEM_FILES_HELP = "Workgate: item files and the index are read-only for agents. Edit the plan with wg plan check|uncheck <n> or wg body --set (stdin); change status with the wg commands.";
+function itemFilePaths(repo) {
+  return [repo.config.todosDir, repo.config.indexFile];
+}
+function isItemFile(repo, abs) {
+  const rel = relative4(repo.toplevel, abs);
+  if (rel.startsWith("..")) return false;
+  return rel === repo.config.indexFile || rel === repo.config.todosDir || rel.startsWith(`${repo.config.todosDir}/`);
+}
 var NO_ITEM_HELP = 'Workgate: this change is not covered by an active item. Run: wg add "<title>" --kind <kind>, then wg claim <id>, and edit inside the printed worktree. The owner can skip this with a [quick] prompt.';
 async function gateWrite(input2) {
   const ti = input2.tool_input ?? {};
@@ -33753,6 +33833,7 @@ async function gateWrite(input2) {
   if (/\/\.git\/workgate(\/|$)/.test(abs)) return deny("Workgate state is managed by the owner and the wg tool only.");
   const repo = await tryResolveRepo(nearestExistingDir(abs));
   if (repo === void 0) return void 0;
+  if (isItemFile(repo, abs)) return deny(ITEM_FILES_HELP);
   if (bypassActive(repo, input2.session_id)) return void 0;
   const item = await itemForToplevel(repo, repo.toplevel);
   if (item !== void 0) return void 0;
@@ -33766,6 +33847,7 @@ async function gateBash(input2) {
   if (touchesProtectedState(command)) {
     return deny("Only the owner may manage workgate bypass or its state; run it yourself with the ! prefix.");
   }
+  if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
   const mutating = mutatingGit(command);
   if (mutating.length === 0) return void 0;
   if (bypassActive(repo, input2.session_id)) {
@@ -33878,7 +33960,7 @@ async function runHook(name, rawInput) {
 
 // src/init.ts
 import { appendFileSync as appendFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
-import { join as join6, relative as relative4 } from "node:path";
+import { join as join6, relative as relative5 } from "node:path";
 function detectGates(root) {
   const pkgFile = join6(root, "package.json");
   if (!existsSync6(pkgFile)) return [];
@@ -33925,7 +34007,7 @@ async function initRepo(cwd, options) {
   if (!existsSync6(keep)) writeFileSync5(keep, "");
   const { items } = loadAll(repo);
   const indexRel = writeIndex(repo, items);
-  const paths = [CONFIG_REL, relative4(loc.mainRoot, keep), indexRel];
+  const paths = [CONFIG_REL, relative5(loc.mainRoot, keep), indexRel];
   if (options.claudeMd) {
     const claudeMd = join6(loc.mainRoot, "CLAUDE.md");
     if (!existsSync6(claudeMd) || !readFileSync5(claudeMd, "utf8").includes("(workgate)")) {
@@ -34246,6 +34328,30 @@ program2.command("report").description("Plain-language report lines of items clo
 program2.command("checkpoint").description("Commit pending changes in the current item's worktree").argument("[message]").action(async (message) => {
   print(await checkpoint(await repoForCwd(), process.cwd(), message));
 });
+program2.command("body").description("Print the current item's body, or replace it from stdin with --set").option("--set", "replace the body with stdin").action(async (opts) => {
+  const repo = await repoForCwd();
+  if (opts.set === true) {
+    const text = await readStdin();
+    if (text.trim() === "") throw new WgError("Refusing to set an empty body; pipe the new body on stdin.");
+    await setBody(repo, process.cwd(), text);
+    print("Body updated.");
+  } else {
+    print(await readBody(repo, process.cwd()));
+  }
+});
+var plan = program2.command("plan").description("Show or tick the current item's plan checklist").action(async () => {
+  const body = await readBody(await repoForCwd(), process.cwd());
+  const steps = planSteps(body);
+  if (steps.length === 0) print('No plan steps. Add "- [ ] step" lines with wg body --set.');
+  for (const s of steps) print(`${s.n}. [${s.checked ? "x" : " "}] ${s.text}`);
+});
+for (const [name, checked] of [["check", true], ["uncheck", false]]) {
+  plan.command(name).description(`Mark plan steps ${checked ? "done" : "open"} by number`).argument("<numbers...>", "step numbers as listed by wg plan").action(async (numbers) => {
+    const nums = numbers.map((n) => Number(n));
+    const progress = await markSteps(await repoForCwd(), process.cwd(), nums, checked);
+    print(`Plan: ${progress.done}/${progress.total}`);
+  });
+}
 program2.command("sync").description("Rebase an item branch onto the integration branch; resolve conflicts with --continue / --abort").argument("[id]", "item id (default: current worktree)", parseId).option("--continue", "continue after resolving conflicts").option("--abort", "abort the rebase").action(async (id, opts) => {
   const repo = await repoForCwd();
   const item = findItem(loadItems(repo), await resolveItemId(repo, id));

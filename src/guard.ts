@@ -300,3 +300,39 @@ export function touchesProtectedState(command: string): boolean {
     return idx !== -1 && words[idx + 1] === 'bypass' && words[idx + 2] !== 'status';
   });
 }
+
+const FILE_WRITERS = new Set(['tee', 'mv', 'cp', 'rm', 'truncate', 'install', 'ln', 'dd', 'rsync', 'patch']);
+const IN_PLACE_EDITORS = new Set(['sed', 'perl', 'ruby']);
+const INTERPRETERS = /^(python[\d.]*|node|ruby|perl|php|deno|bun)$/;
+
+function basename0(words: readonly string[]): string {
+  return (words[0] ?? '').split('/').pop() ?? '';
+}
+
+function escapeRegex(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * True when the shell command appears to write to one of the given repo-relative paths (item files
+ * and the index). Reads such as cat and grep pass. Like the git guard this catches mistakes, it is
+ * not a security boundary.
+ */
+export function writesProtectedPaths(command: string, paths: readonly string[]): boolean {
+  if (paths.length === 0) return false;
+  const alternatives = paths.map(escapeRegex).join('|');
+  if (new RegExp(`>>?\\s*['"]?[^\\s'"]*(${alternatives})`).test(command)) return true;
+  return splitCommands(command).some((segment) => {
+    let words = segment;
+    while (WRAPPERS.has(basename0(words))) words = words.slice(1);
+    const name = basename0(words);
+    if (SHELLS.has(name)) {
+      const idx = words.findIndex((w) => /^-[a-z]*c$/.test(w));
+      const script = idx === -1 ? undefined : words[idx + 1];
+      if (script !== undefined) return writesProtectedPaths(script, paths);
+    }
+    if (!words.some((w) => paths.some((p) => w.includes(p)))) return false;
+    if (FILE_WRITERS.has(name) || INTERPRETERS.test(name)) return true;
+    return IN_PLACE_EDITORS.has(name) && words.some((w) => /^-[a-zA-Z]*i/.test(w) || w === '--in-place');
+  });
+}

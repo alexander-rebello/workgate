@@ -95,6 +95,36 @@ describe('pre-tool-use: write gate', () => {
   });
 });
 
+describe('pre-tool-use: item files are read-only for the agent', () => {
+  const guarded = ['docs/todos/0001-gate.md', 'docs/TODO.md'];
+
+  it('denies Edit/Write on item files and the index in the main checkout, a worktree and during a bypass', () => {
+    repo.wgOk(['add', 'Gate', '--kind', 'feature']);
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    for (const base of [repo.dir, wt]) {
+      for (const rel of guarded) {
+        const r = edit(join(base, rel));
+        expect(r.decision).toBe('deny');
+        expect(r.reason).toContain('wg plan');
+      }
+    }
+    expect(edit(join(wt, 'src', 'ok.ts')).decision).toBeUndefined();
+    repo.wgOk(['bypass', '30m']);
+    expect(edit(join(repo.dir, 'docs/todos/0001-gate.md')).decision).toBe('deny');
+  });
+
+  it('denies shell writes to item files but allows reading them', () => {
+    expect(bash('sed -i s/a/b/ docs/todos/0001-gate.md').decision).toBe('deny');
+    expect(bash('echo x >> docs/TODO.md').decision).toBe('deny');
+    expect(bash('rm docs/todos/0001-gate.md').decision).toBe('deny');
+    expect(bash('tee docs/todos/0001-gate.md').decision).toBe('deny');
+    expect(bash('bash -c "mv a docs/todos/b.md"').decision).toBe('deny');
+    expect(bash('cat docs/todos/0001-gate.md').raw).toBe('');
+    expect(bash('grep -rn foo docs/todos').raw).toBe('');
+    expect(bash('wg plan check 1').raw).toBe('');
+  });
+});
+
 describe('bypass via [quick] prompt', () => {
   it('opens the gate for one prompt, allows commits but not push, then records an item', () => {
     const start = hook('user-prompt-submit', { prompt: '[quick] fix the typo' });

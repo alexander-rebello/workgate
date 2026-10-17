@@ -5,7 +5,7 @@ description: Overview and entry point for the repo's work items (the `wg` CLI). 
 
 # /wg
 
-Front end for the `wg` CLI. All state changes go through the CLI; never edit item files or the index by hand and never run mutating git commands.
+Front end for the `wg` CLI. All state changes go through the CLI; item files and the index are read-only (hooks deny edits everywhere); change the plan with `wg body --set` (stdin) and `wg plan check|uncheck <n>`; never run mutating git commands.
 
 If `command -v wg` fails or the repo has no `.workgate/config.json`, say so in one line and stop (`wg init` sets a repo up).
 
