@@ -45,7 +45,13 @@ function parseIds(value: string): number[] {
 
 function collectAttest(value: string, previous: Record<string, string>): Record<string, string> {
   const eq = value.indexOf('=');
-  if (eq <= 0) throw new InvalidArgumentError('Expected name=ok or name=n/a.');
+  if (eq <= 0) throw new InvalidArgumentError('Expected name=ok, name=n/a or name=unchanged.');
+  return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
+}
+
+function collectAttestReason(value: string, previous: Record<string, string>): Record<string, string> {
+  const eq = value.indexOf('=');
+  if (eq <= 0) throw new InvalidArgumentError('Expected name=reason.');
   return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
 }
 
@@ -392,12 +398,19 @@ program
   .requiredOption('--outcome <text>', 'what changed, in one or two sentences')
   .option('--report <text>', 'plain-language line for the owner (user-visible changes)')
   .option('--no-report', 'nothing user-visible to report')
-  .option('--attest <name=value>', 'answer to a configured attestation (ok or n/a)', collectAttest, {})
-  .action(async (id: number | undefined, opts: { outcome: string; report?: string | false; attest: Record<string, string> }) => {
+  .option('--attest <name=value>', 'answer to a configured attestation (ok, n/a or unchanged)', collectAttest, {})
+  .option('--attest-reason <name=text>', 'why the required files already cover the change (required with unchanged)', collectAttestReason, {})
+  .action(async (id: number | undefined, opts: { outcome: string; report?: string | false; attest: Record<string, string>; attestReason: Record<string, string> }) => {
     const repo = await repoForCwd();
     const itemId = await resolveItemId(repo, id);
     const report = typeof opts.report === 'string' ? opts.report : undefined;
-    const result = await doneItem(repo, itemId, { outcome: opts.outcome, report, noReport: opts.report === false, attest: opts.attest });
+    const result = await doneItem(repo, itemId, {
+      outcome: opts.outcome,
+      report,
+      noReport: opts.report === false,
+      attest: opts.attest,
+      attestReason: opts.attestReason,
+    });
     for (const line of result.log) print(line);
     print(`Done #${itemId}.`);
   });

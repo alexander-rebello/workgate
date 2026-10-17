@@ -415,21 +415,41 @@ export async function syncItem(repo: Repo, item: Item, mode: 'start' | 'continue
   return { ok: false, conflicts };
 }
 
+function trimmedReasons(raw: Record<string, string>): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(raw)
+      .map(([name, text]): [string, string] => [name, text.trim()])
+      .filter(([, text]) => text !== ''),
+  );
+}
+
 export function checkAttestations(
   repo: Repo,
   provided: Record<string, string>,
   files: readonly string[],
+  reasons: Record<string, string> = {},
 ): string[] {
   const problems: string[] = [];
   for (const att of repo.config.attestations) {
     const value = provided[att.name];
     if (value === undefined) {
-      problems.push(`Missing --attest ${att.name}=ok|n/a (${att.description}).`);
+      problems.push(`Missing --attest ${att.name}=ok|n/a|unchanged (${att.description}).`);
       continue;
     }
-    if (value !== 'ok' && value !== 'n/a') {
-      problems.push(`--attest ${att.name} must be "ok" or "n/a", got "${value}".`);
+    if (value !== 'ok' && value !== 'n/a' && value !== 'unchanged') {
+      problems.push(`--attest ${att.name} must be "ok", "n/a" or "unchanged", got "${value}".`);
       continue;
+    }
+    const reason = reasons[att.name]?.trim() ?? '';
+    // "unchanged" is the only answer the diff cannot check, so it must carry a recorded justification.
+    if (value === 'unchanged') {
+      if (reason === '') {
+        problems.push(`--attest ${att.name}=unchanged needs --attest-reason ${att.name}="<why ${att.require.join(', ') || 'the required files'} already cover this change>".`);
+      }
+      continue;
+    }
+    if (reason !== '') {
+      problems.push(`--attest-reason ${att.name} is only valid with --attest ${att.name}=unchanged.`);
     }
     const watched = att.watch.length > 0 ? files.filter((f) => picomatch.isMatch(f, att.watch)) : [];
     const satisfied = att.require.length > 0 && files.some((f) => picomatch.isMatch(f, att.require));
@@ -450,6 +470,7 @@ export interface DoneOptions {
   report?: string | undefined;
   noReport: boolean;
   attest: Record<string, string>;
+  attestReason?: Record<string, string> | undefined;
 }
 
 export interface DoneResult {
@@ -532,8 +553,10 @@ export async function doneItem(repo: Repo, id: number, options: DoneOptions): Pr
 
     const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
     if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
-    const problems = checkAttestations(repo, options.attest, files);
+    const reasons = trimmedReasons(options.attestReason ?? {});
+    const problems = checkAttestations(repo, options.attest, files, reasons);
     if (problems.length > 0) throw new WgError(problems.join('\n'));
+    const unchanged = Object.entries(options.attest).filter(([, value]) => value === 'unchanged');
 
     const overlaps = await overlapWarnings(repo, items, item, files);
     log.push(...overlaps);
@@ -554,6 +577,7 @@ export async function doneItem(repo: Repo, id: number, options: DoneOptions): Pr
           outcome: options.outcome.trim(),
           ...(options.report === undefined ? {} : { report: options.report.trim() }),
           ...(Object.keys(options.attest).length === 0 ? {} : { attest: options.attest }),
+          ...(Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }),
         },
         ['wt', 'branch', 'needs'],
       );
@@ -563,7 +587,9 @@ export async function doneItem(repo: Repo, id: number, options: DoneOptions): Pr
       const paths = [relative(repo.mainRoot, next.file), indexRel];
       paths.push(...appendReportLine(repo, options.report, id));
       await git(repo.mainRoot, ['add', '--all', '--', ...paths]);
-      await git(repo.mainRoot, ['commit', '--no-verify', '-m', `${mergeMsg}\n\nTodo: #${id}`]);
+      const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ''}`);
+      const body = [...attestLines, `Todo: #${id}`].join('\n');
+      await git(repo.mainRoot, ['commit', '--no-verify', '-m', `${mergeMsg}\n\n${body}`]);
       log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
       await git(repo.mainRoot, ['worktree', 'remove', '--force', info.path]);
       await git(repo.mainRoot, ['branch', '-d', branch]);

@@ -30,6 +30,7 @@ export const ItemMetaSchema = z
     report: z.string().min(1).optional(),
     reason: z.string().min(1).optional(),
     attest: z.record(z.string(), z.string()).optional(),
+    attestReason: z.record(z.string(), z.string()).optional(),
   })
   .strict()
   .superRefine((meta, ctx) => {

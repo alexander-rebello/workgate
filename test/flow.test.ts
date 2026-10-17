@@ -205,6 +205,27 @@ describe('done', () => {
     expect(repo.wgOk(['show', String(id)])).toBeDefined();
   });
 
+  it('accepts attest=unchanged when watched files changed but the required files are already accurate', () => {
+    repo.setConfig({
+      ...passing,
+      attestations: [
+        { name: 'docs', description: 'docs updated', watch: ['src/**'], require: ['docs/rules/**'] },
+      ],
+    });
+    const id = add('Unchanged');
+    const wt = worktreeFrom(repo.wgOk(['claim', String(id)]));
+    repo.write('src/a.ts', 'export {}', wt);
+    const base = ['done', String(id), '--outcome', 'o', '--no-report'];
+    expect(repo.wg([...base, '--attest', 'docs=bogus'], wt).err).toContain('ok", "n/a" or "unchanged');
+    expect(repo.wg([...base, '--attest', 'docs=unchanged'], wt).err).toContain('needs --attest-reason docs');
+    expect(repo.wg([...base, '--attest', 'docs=unchanged', '--attest-reason', 'docs='], wt).err).toContain('needs --attest-reason docs');
+    expect(repo.wg([...base, '--attest', 'docs=ok', '--attest-reason', 'docs=because'], wt).err).toContain('only valid with');
+    const done = repo.wg([...base, '--attest', 'docs=unchanged', '--attest-reason', 'docs=rules already describe the renamed symbol'], wt);
+    expect(done.code).toBe(0);
+    expect(repo.git(['log', '-1', '--format=%B'])).toContain('Attest docs: unchanged - rules already describe the renamed symbol');
+    expect(repo.read(`docs/todos/${String(id).padStart(4, '0')}-unchanged.md`)).toContain('rules already describe the renamed symbol');
+  });
+
   it('closes decision items directly with an outcome', () => {
     repo.wgOk(['add', 'Which db?', '--kind', 'decision', '--needs', 'pick a db']);
     repo.wgOk(['done', '1', '--outcome', 'Postgres', '--no-report']);

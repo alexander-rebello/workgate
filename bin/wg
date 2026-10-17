@@ -32594,7 +32594,8 @@ var ItemMetaSchema = external_exports.object({
   outcome: external_exports.string().min(1).optional(),
   report: external_exports.string().min(1).optional(),
   reason: external_exports.string().min(1).optional(),
-  attest: external_exports.record(external_exports.string(), external_exports.string()).optional()
+  attest: external_exports.record(external_exports.string(), external_exports.string()).optional(),
+  attestReason: external_exports.record(external_exports.string(), external_exports.string()).optional()
 }).strict().superRefine((meta3, ctx) => {
   const need = (field, message) => {
     if (meta3[field] === void 0) {
@@ -32663,7 +32664,8 @@ var KEY_ORDER = [
   "outcome",
   "report",
   "reason",
-  "attest"
+  "attest",
+  "attestReason"
 ];
 function todayIso(now = /* @__PURE__ */ new Date()) {
   return now.toISOString().slice(0, 10);
@@ -32869,7 +32871,7 @@ import { dirname as dirname4, relative as relative4, resolve as resolve2 } from 
 function rulesText(repo) {
   const c = repo.config;
   const gates = c.gates.length === 0 ? "none configured" : c.gates.map((g) => g.name).join(", ");
-  const attest = c.attestations.length === 0 ? "" : ` Also pass ${c.attestations.map((a) => `--attest ${a.name}=ok|n/a`).join(" ")} (${c.attestations.map((a) => `${a.name}: ${a.description}`).join("; ")}).`;
+  const attest = c.attestations.length === 0 ? "" : ` Also pass ${c.attestations.map((a) => `--attest ${a.name}=ok|n/a|unchanged`).join(" ")} (${c.attestations.map((a) => `${a.name}: ${a.description}`).join("; ")}). If the required files already cover the change, answer unchanged and add --attest-reason <name>="<why>"; never edit a file just to satisfy the check.`;
   return [
     "Workgate is active in this repository. Work items are files in " + c.todosDir + "/; the index " + c.indexFile + " is generated.",
     "- Anything that changes files must belong to an item. Read-only questions need none.",
@@ -33584,17 +33586,32 @@ Todo: #${item.meta.id}`]);
   }
   return { ok: false, conflicts };
 }
-function checkAttestations(repo, provided, files) {
+function trimmedReasons(raw) {
+  return Object.fromEntries(
+    Object.entries(raw).map(([name, text]) => [name, text.trim()]).filter(([, text]) => text !== "")
+  );
+}
+function checkAttestations(repo, provided, files, reasons = {}) {
   const problems = [];
   for (const att of repo.config.attestations) {
     const value = provided[att.name];
     if (value === void 0) {
-      problems.push(`Missing --attest ${att.name}=ok|n/a (${att.description}).`);
+      problems.push(`Missing --attest ${att.name}=ok|n/a|unchanged (${att.description}).`);
       continue;
     }
-    if (value !== "ok" && value !== "n/a") {
-      problems.push(`--attest ${att.name} must be "ok" or "n/a", got "${value}".`);
+    if (value !== "ok" && value !== "n/a" && value !== "unchanged") {
+      problems.push(`--attest ${att.name} must be "ok", "n/a" or "unchanged", got "${value}".`);
       continue;
+    }
+    const reason = reasons[att.name]?.trim() ?? "";
+    if (value === "unchanged") {
+      if (reason === "") {
+        problems.push(`--attest ${att.name}=unchanged needs --attest-reason ${att.name}="<why ${att.require.join(", ") || "the required files"} already cover this change>".`);
+      }
+      continue;
+    }
+    if (reason !== "") {
+      problems.push(`--attest-reason ${att.name} is only valid with --attest ${att.name}=unchanged.`);
     }
     const watched = att.watch.length > 0 ? files.filter((f) => import_picomatch.default.isMatch(f, att.watch)) : [];
     const satisfied = att.require.length > 0 && files.some((f) => import_picomatch.default.isMatch(f, att.require));
@@ -33681,8 +33698,10 @@ Resolve the files, then run "wg sync ${id} --continue" (or "wg sync ${id} --abor
     await runGates(repo, info.path, log);
     const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
     if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
-    const problems = checkAttestations(repo, options.attest, files);
+    const reasons = trimmedReasons(options.attestReason ?? {});
+    const problems = checkAttestations(repo, options.attest, files, reasons);
     if (problems.length > 0) throw new WgError(problems.join("\n"));
+    const unchanged = Object.entries(options.attest).filter(([, value]) => value === "unchanged");
     const overlaps = await overlapWarnings(repo, items, item, files);
     log.push(...overlaps);
     const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})${repo.config.commitSuffix}`;
@@ -33701,7 +33720,8 @@ ${merge2.output}`);
           closed: todayIso(),
           outcome: options.outcome.trim(),
           ...options.report === void 0 ? {} : { report: options.report.trim() },
-          ...Object.keys(options.attest).length === 0 ? {} : { attest: options.attest }
+          ...Object.keys(options.attest).length === 0 ? {} : { attest: options.attest },
+          ...Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }
         },
         ["wt", "branch", "needs"]
       );
@@ -33711,9 +33731,11 @@ ${merge2.output}`);
       const paths = [relative3(repo.mainRoot, next.file), indexRel];
       paths.push(...appendReportLine(repo, options.report, id));
       await git(repo.mainRoot, ["add", "--all", "--", ...paths]);
+      const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ""}`);
+      const body = [...attestLines, `Todo: #${id}`].join("\n");
       await git(repo.mainRoot, ["commit", "--no-verify", "-m", `${mergeMsg}
 
-Todo: #${id}`]);
+${body}`]);
       log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
       await git(repo.mainRoot, ["worktree", "remove", "--force", info.path]);
       await git(repo.mainRoot, ["branch", "-d", branch]);
@@ -34165,7 +34187,12 @@ function parseIds(value) {
 }
 function collectAttest(value, previous) {
   const eq = value.indexOf("=");
-  if (eq <= 0) throw new InvalidArgumentError("Expected name=ok or name=n/a.");
+  if (eq <= 0) throw new InvalidArgumentError("Expected name=ok, name=n/a or name=unchanged.");
+  return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
+}
+function collectAttestReason(value, previous) {
+  const eq = value.indexOf("=");
+  if (eq <= 0) throw new InvalidArgumentError("Expected name=reason.");
   return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
 }
 function print(text) {
@@ -34365,11 +34392,17 @@ Resolve them, then run: wg sync ${item.meta.id} --continue`);
     process.exitCode = 1;
   }
 });
-program2.command("done").description("Rebase, run gates, merge into the integration branch, close the item and clean up").argument("[id]", "item id (default: current worktree)", parseId).requiredOption("--outcome <text>", "what changed, in one or two sentences").option("--report <text>", "plain-language line for the owner (user-visible changes)").option("--no-report", "nothing user-visible to report").option("--attest <name=value>", "answer to a configured attestation (ok or n/a)", collectAttest, {}).action(async (id, opts) => {
+program2.command("done").description("Rebase, run gates, merge into the integration branch, close the item and clean up").argument("[id]", "item id (default: current worktree)", parseId).requiredOption("--outcome <text>", "what changed, in one or two sentences").option("--report <text>", "plain-language line for the owner (user-visible changes)").option("--no-report", "nothing user-visible to report").option("--attest <name=value>", "answer to a configured attestation (ok, n/a or unchanged)", collectAttest, {}).option("--attest-reason <name=text>", "why the required files already cover the change (required with unchanged)", collectAttestReason, {}).action(async (id, opts) => {
   const repo = await repoForCwd();
   const itemId2 = await resolveItemId(repo, id);
   const report = typeof opts.report === "string" ? opts.report : void 0;
-  const result = await doneItem(repo, itemId2, { outcome: opts.outcome, report, noReport: opts.report === false, attest: opts.attest });
+  const result = await doneItem(repo, itemId2, {
+    outcome: opts.outcome,
+    report,
+    noReport: opts.report === false,
+    attest: opts.attest,
+    attestReason: opts.attestReason
+  });
   for (const line2 of result.log) print(line2);
   print(`Done #${itemId2}.`);
 });

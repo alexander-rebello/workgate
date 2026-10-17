@@ -53,7 +53,7 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 | `wg resume <id>`, `wg release <id>` | re-attach after an interruption, or give an item back |
 | `wg checkpoint [message]` | commit pending changes in the current item worktree |
 | `wg sync [id] [--continue\|--abort]` | rebase onto the integration branch, resolve conflicts |
-| `wg done [id] --outcome t (--report t \| --no-report) [--attest name=ok\|n/a]` | rebase, gates, attestations, merge, close, clean up |
+| `wg done [id] --outcome t (--report t \| --no-report) [--attest name=ok\|n/a\|unchanged [--attest-reason name=t]]` | rebase, gates, attestations, merge, close, clean up |
 | `wg block <id> --needs t`, `wg unblock <id> [answer]` | ask the owner / record the answer |
 | `wg drop <id> --reason t [--force]` | close without doing it |
 | `wg review [--since d]`, `wg verify <id>`, `wg report [--since d]` | final review queue and meeting report |
@@ -90,7 +90,7 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 ```
 
 - `gates` run in the item worktree before a merge; any failure aborts and merges nothing.
-- `attestations` become mandatory `--attest name=ok|n/a` answers on `wg done`. `n/a` is refused when a `watch` file changed and no `require` file did; `ok` is refused when no `require` file changed.
+- `attestations` become mandatory `--attest name=ok|n/a|unchanged` answers on `wg done`. `n/a` is refused when a `watch` file changed and no `require` file did; `ok` is refused when no `require` file changed. `unchanged` means the `require` files were reviewed and already cover the change; it needs `--attest-reason name="<why>"`, which is recorded in the item (`attestReason`) and the merge commit body.
 - `commitSuffix` is appended to bookkeeping commit subjects (for example ` [skip ci]`).
 - `reportFile`, when set, receives a `- date - text (#id)` line for every `--report`.
 

@@ -23,6 +23,7 @@ const KEY_ORDER: readonly (keyof ItemMeta)[] = [
   'report',
   'reason',
   'attest',
+  'attestReason',
 ];
 
 export function todayIso(now: Date = new Date()): string {

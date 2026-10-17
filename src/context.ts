@@ -6,7 +6,7 @@ export function rulesText(repo: Repo): string {
   const gates = c.gates.length === 0 ? 'none configured' : c.gates.map((g) => g.name).join(', ');
   const attest = c.attestations.length === 0
     ? ''
-    : ` Also pass ${c.attestations.map((a) => `--attest ${a.name}=ok|n/a`).join(' ')} (${c.attestations.map((a) => `${a.name}: ${a.description}`).join('; ')}).`;
+    : ` Also pass ${c.attestations.map((a) => `--attest ${a.name}=ok|n/a|unchanged`).join(' ')} (${c.attestations.map((a) => `${a.name}: ${a.description}`).join('; ')}). If the required files already cover the change, answer unchanged and add --attest-reason <name>="<why>"; never edit a file just to satisfy the check.`;
   return [
     'Workgate is active in this repository. Work items are files in ' + c.todosDir + '/; the index ' + c.indexFile + ' is generated.',
     '- Anything that changes files must belong to an item. Read-only questions need none.',
