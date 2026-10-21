@@ -33704,7 +33704,7 @@ Resolve the files, then run "wg sync ${id} --continue" (or "wg sync ${id} --abor
     const unchanged = Object.entries(options.attest).filter(([, value]) => value === "unchanged");
     const overlaps = await overlapWarnings(repo, items, item, files);
     log.push(...overlaps);
-    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})${repo.config.commitSuffix}`;
+    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
     const merge2 = await gitOkOutput(repo.mainRoot, ["merge", "--no-ff", "--no-commit", branch]);
     if (!merge2.ok) {
       await gitOk(repo.mainRoot, ["merge", "--abort"]);

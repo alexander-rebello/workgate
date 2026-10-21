@@ -91,7 +91,7 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 
 - `gates` run in the item worktree before a merge; any failure aborts and merges nothing.
 - `attestations` become mandatory `--attest name=ok|n/a|unchanged` answers on `wg done`. `n/a` is refused when a `watch` file changed and no `require` file did; `ok` is refused when no `require` file changed. `unchanged` means the `require` files were reviewed and already cover the change; it needs `--attest-reason name="<why>"`, which is recorded in the item (`attestReason`) and the merge commit body.
-- `commitSuffix` is appended to bookkeeping commit subjects (for example ` [skip ci]`).
+- `commitSuffix` is appended to bookkeeping commit subjects (for example ` [skip ci]`). The merge commit written by `wg done` never gets it, since it carries the real change and is what a push ships.
 - `reportFile`, when set, receives a `- date - text (#id)` line for every `--report`.
 
 ## What the plugin enforces
