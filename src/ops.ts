@@ -561,7 +561,7 @@ export async function doneItem(repo: Repo, id: number, options: DoneOptions): Pr
     const overlaps = await overlapWarnings(repo, items, item, files);
     log.push(...overlaps);
 
-    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})${repo.config.commitSuffix}`;
+    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
     const merge = await gitOkOutput(repo.mainRoot, ['merge', '--no-ff', '--no-commit', branch]);
     if (!merge.ok) {
       await gitOk(repo.mainRoot, ['merge', '--abort']);

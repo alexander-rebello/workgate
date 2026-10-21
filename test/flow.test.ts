@@ -144,6 +144,18 @@ describe('done', () => {
     expect(repo.wgOk(['doctor'])).toContain('No problems');
   });
 
+  it('keeps commitSuffix off the merge commit so a push after done still triggers CI', () => {
+    repo.setConfig({ ...passing, commitSuffix: ' [skip ci]' });
+    const id = add('Suffix check');
+    expect(repo.git(['log', '--format=%s', '-1'])).toContain('[skip ci]');
+    const wt = worktreeFrom(repo.wgOk(['claim', String(id)]));
+    repo.write('x.txt', 'x', wt);
+    repo.wgOk(['done', '--outcome', 'ok', '--no-report'], wt);
+    const subject = repo.git(['log', '--format=%s', '-1']);
+    expect(subject).toContain('Merge 1-suffix-check');
+    expect(subject).not.toContain('[skip ci]');
+  });
+
   it('works from the id alone when run inside the worktree', () => {
     repo.setConfig(passing);
     const id = add('Implicit id');
