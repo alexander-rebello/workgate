@@ -1,5 +1,5 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { WG, makeRepo, worktreeFrom, type TestRepo } from './helpers.js';
@@ -222,6 +222,17 @@ describe('session start and prompt hooks', () => {
     expect(r.raw).toBe('');
     hook('post-tool-use', { tool_name: 'Bash', cwd: wt });
     expect(readdirSync(join(repo.dir, '.git', 'workgate', 'leases'))).toContain('1.json');
+  });
+
+  it('keeps the lease fresh for file tools that edit a worktree from the main checkout', () => {
+    repo.wgOk(['add', 'Sub', '--kind', 'feature']);
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    const lease = join(repo.dir, '.git', 'workgate', 'leases', '1.json');
+    rmSync(lease);
+    hook('post-tool-use', { tool_name: 'Bash', cwd: repo.dir });
+    expect(existsSync(lease)).toBe(false);
+    hook('post-tool-use', { tool_name: 'Edit', cwd: repo.dir, tool_input: { file_path: join(wt, 'src', 'new', 'a.ts') } });
+    expect(existsSync(lease)).toBe(true);
   });
 
   it('never fails the session on malformed input', () => {

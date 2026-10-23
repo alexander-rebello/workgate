@@ -11,6 +11,7 @@
     "bin",
     "hooks",
     "skills",
+    "agents",
     ".claude-plugin",
     "README.md",
     "LICENSE"

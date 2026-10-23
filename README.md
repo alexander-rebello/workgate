@@ -107,6 +107,20 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 
 The Bash checks are a guard against mistakes, not a security boundary.
 
+## Working through a backlog
+
+`/wg-run` (plugin) works the ready items unattended. The session you start it in is only a dispatcher. Each item goes to a fresh `wg-worker` subagent with its own context. The subagent claims the item, implements it in its worktree, runs the gates and finishes with `wg done`. If it needs something from the owner, it blocks the item with `wg block --needs` instead. It replies with a single line, so the dispatcher's context grows by about a line per item, and a large backlog fits in one session.
+
+```
+/wg-run              # everything that is ready, one at a time
+/wg-run 10           # stop after 10 items
+/wg-run --parallel 2 # two workers at a time (only for items in separate areas)
+```
+
+- Before starting, clean up the backlog: drop duplicates, turn questions into decision items, and set `after:` where order matters. `wg next` decides what runs.
+- When the worktree directory is outside the project, add it with `/add-dir` so workers aren't stopped by permission prompts.
+- The run stops when nothing is ready, at the limit, or after three items in a row that didn't finish. Then it lists what is waiting on you. Answer with `wg unblock`, check the finished work with `wg review`, and start `/wg-run` again. All state lives in the items, so a run can be resumed from any session.
+
 ## Status line
 
 `wg statusline install` copies the renderer to `~/.claude/workgate/wg` and sets `statusLine` (with a 30 second refresh) in `~/.claude/settings.json`. It shows 5-hour and 7-day usage with the reset countdown, context left, the todo counts (`blocked` red, `open` yellow, `total` cyan), the current item and the model. A different existing `statusLine` is only replaced with `--force` and is backed up first.
