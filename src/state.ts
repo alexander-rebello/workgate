@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { WgError } from './errors.js';
@@ -102,7 +102,16 @@ export async function withLock<T>(repo: Repo, fn: () => Promise<T>): Promise<T> 
       mkdirSync(lock);
       break;
     } catch {
-      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+      let age: number;
+      try {
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        // The holder released the lock between our mkdir and this stat: try again right away
+        // (bounded by the deadline in case mkdir keeps failing for another reason).
+        if (Date.now() > deadline) throw new WgError('Timed out waiting for the workgate lock.');
+        continue;
+      }
+      if (age > LOCK_STALE_MS) {
         rmSync(lock, { recursive: true, force: true });
         continue;
       }
