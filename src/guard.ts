@@ -55,7 +55,11 @@ interface Word {
 
 /** Splits a command into simple commands (lists of words), expanding $(...) and backticks. */
 export function splitCommands(input: string, depth = 0): string[][] {
-  const commands: string[][] = [];
+  return splitWords(input, depth).map((words) => words.map((w) => w.text));
+}
+
+function splitWords(input: string, depth: number): Word[][] {
+  const commands: Word[][] = [];
   if (depth > 4) return commands;
   let words: Word[] = [];
   let current = '';
@@ -70,12 +74,12 @@ export function splitCommands(input: string, depth = 0): string[][] {
   };
   const flushCommand = (): void => {
     flushWord();
-    if (words.length > 0) commands.push(words.map((w) => w.text));
+    if (words.length > 0) commands.push(words);
     words = [];
   };
 
   const nested = (code: string): void => {
-    for (const cmd of splitCommands(code, depth + 1)) commands.push(cmd);
+    for (const cmd of splitWords(code, depth + 1)) commands.push(cmd);
   };
 
   let i = 0;
@@ -335,4 +339,120 @@ export function writesProtectedPaths(command: string, paths: readonly string[]):
     if (FILE_WRITERS.has(name) || INTERPRETERS.test(name)) return true;
     return IN_PLACE_EDITORS.has(name) && words.some((w) => /^-[a-zA-Z]*i/.test(w) || w === '--in-place');
   });
+}
+
+const HEREDOC = /<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/g;
+
+/** Drops here-document bodies so their text is not read as commands. */
+function stripHeredocs(input: string): string {
+  const kept: string[] = [];
+  const pending: string[] = [];
+  for (const line of input.split('\n')) {
+    if (pending.length > 0) {
+      if (line.trim() === pending[0]) pending.shift();
+      continue;
+    }
+    kept.push(line);
+    for (const m of line.matchAll(HEREDOC)) {
+      if (line[m.index + 2] === '<' || line[m.index - 1] === '<') continue;
+      pending.push(m[3] ?? '');
+    }
+  }
+  return kept.join('\n');
+}
+
+const REDIRECT = /^\d*(>>?|>\|)(.*)$/;
+const COPIERS = new Set(['cp', 'mv', 'install', 'ln', 'rsync']);
+const REMOVERS = new Set(['rm', 'rmdir', 'truncate', 'touch', 'mkdir']);
+const SCRIPT_EDITORS = new Set(['sed', 'perl', 'ruby']);
+/** Options that consume the next word, per command, so that word is not taken for a path. */
+const OPTION_ARGS: Record<string, ReadonlySet<string>> = {
+  truncate: new Set(['-s', '-r', '--size', '--reference']),
+  touch: new Set(['-r', '-t', '-d', '--reference', '--date']),
+  mkdir: new Set(['-m', '--mode']),
+  install: new Set(['-m', '-o', '-g', '--mode', '--owner', '--group']),
+  sed: new Set(['-e', '-f']),
+  perl: new Set(['-e', '-E']),
+  ruby: new Set(['-e']),
+};
+const NO_OPTION_ARGS: ReadonlySet<string> = new Set();
+
+function positionals(name: string, words: readonly string[]): string[] {
+  const withArg = OPTION_ARGS[name] ?? NO_OPTION_ARGS;
+  const out: string[] = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i] ?? '';
+    if (withArg.has(w)) i += 1;
+    else if (!w.startsWith('-')) out.push(w);
+  }
+  return out;
+}
+
+function editorTargets(name: string, words: readonly string[]): string[] {
+  const inPlace = words.findIndex((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith('--in-place'));
+  if (inPlace === -1) return [];
+  const rest = [...words];
+  // BSD sed takes the backup suffix as a separate word: sed -i '' ...
+  const next = rest[inPlace + 1];
+  if (rest[inPlace] === '-i' && next !== undefined && (next === '' || next.startsWith('.'))) rest.splice(inPlace + 1, 1);
+  const files = positionals(name, rest);
+  const hasScriptOption = rest.some((w) => w === '-e' || w === '-f' || /^-[a-zA-Z]*e$/.test(w));
+  return hasScriptOption ? files : files.slice(1);
+}
+
+function commandTargets(words: readonly Word[], depth: number): string[] {
+  const targets: string[] = [];
+  const plain: string[] = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === undefined) continue;
+    const m = w.quoted ? null : REDIRECT.exec(w.text);
+    if (m === null) {
+      plain.push(w.text);
+      continue;
+    }
+    const inline = m[2] ?? '';
+    if (inline !== '') targets.push(inline);
+    else if (words[i + 1] !== undefined) {
+      targets.push(words[i + 1]?.text ?? '');
+      i += 1;
+    }
+  }
+  let rest = plain;
+  while (rest.length > 0 && (WRAPPERS.has(basename0(rest)) || isAssignment(rest[0] ?? ''))) rest = rest.slice(1);
+  const name = basename0(rest);
+  const args = rest.slice(1);
+  if (SHELLS.has(name)) {
+    const idx = args.findIndex((w) => /^-[a-z]*c$/.test(w));
+    const script = idx === -1 ? undefined : args[idx + 1];
+    if (script !== undefined) targets.push(...collectTargets(script, depth + 1));
+  } else if (name === 'eval') {
+    targets.push(...collectTargets(args.join(' '), depth + 1));
+  } else if (name === 'tee' || REMOVERS.has(name)) {
+    targets.push(...positionals(name, args));
+  } else if (COPIERS.has(name)) {
+    const files = positionals(name, args);
+    if (files.length >= 2) targets.push(files[files.length - 1] ?? '');
+  } else if (SCRIPT_EDITORS.has(name)) {
+    targets.push(...editorTargets(name, args));
+  } else if (name === 'dd') {
+    for (const a of args) if (a.startsWith('of=')) targets.push(a.slice(3));
+  }
+  return targets;
+}
+
+function collectTargets(command: string, depth: number): string[] {
+  if (depth > 4) return [];
+  return splitWords(stripHeredocs(command), depth).flatMap((words) => commandTargets(words, depth));
+}
+
+/**
+ * Paths a shell command appears to write, create or delete, as written in the command. Targets that
+ * cannot be resolved statically (variables, substitutions) and device files are left out. Interpreter
+ * scripts are not inspected. Used for a warning only, so misses are acceptable and false alarms are not.
+ */
+export function shellWriteTargets(command: string): string[] {
+  return collectTargets(command, 0).filter(
+    (t) => t !== '' && !t.includes('$') && !t.includes('`') && !t.startsWith('/dev/'),
+  );
 }

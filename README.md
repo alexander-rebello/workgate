@@ -41,7 +41,7 @@ This writes `.workgate/config.json` (integration branch, detected `lint`/`build`
 
 Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Items may declare `after: [ids]` and `parent: id`. Fields are validated on every read; `wg doctor` reports problems.
 
-`blocked` is how the owner is asked for something. Decision items start blocked and are answered with `wg done <id> --outcome "..."`.
+`blocked` is how the owner is asked for something. Decision items start blocked and are answered with `wg done <id> --outcome "..." (--report "..." | --no-report)`; they are never claimed.
 
 ## Commands
 
@@ -101,10 +101,11 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 - Session start: the workflow rules plus a digest of blocked and stale items are injected into the context.
 - Mutating git (`commit`, `merge`, `rebase`, `push`, `branch`, `worktree`, `reset`, `stash`, `checkout`, ...) is denied in Bash; read-only git is allowed.
 - Edits (`Edit`, `Write`, `MultiEdit`, `NotebookEdit`) are denied unless the file lies in the worktree of an active item. Read-only work needs no item.
+- Shell writes into a workgate repository outside an active item's worktree (redirects, `tee`, `sed -i`, `cp`/`mv`/`rm`, `touch`, `mkdir`, `dd of=`) are allowed but get a warning injected into the context. They are not denied because shell parsing is too imprecise for a hard gate; interpreter scripts (`python -c`, `node -e`) are not inspected. Shell writes to item files and the index are denied.
 - A heartbeat keeps the lease of the item you work on fresh. An `active` item without a recent heartbeat is shown as stale; nothing is released automatically. `wg resume` re-attaches.
 - Starting a prompt with `[quick]` lifts the gate for that prompt only. Commits made during it are recorded as a closed item afterwards. `wg bypass 30m` does the same for a time window and can only be run by the owner (`!` prefix); the agent is denied access to it.
 
-The Bash check is a guard against mistakes, not a security boundary.
+The Bash checks are a guard against mistakes, not a security boundary.
 
 ## Status line
 

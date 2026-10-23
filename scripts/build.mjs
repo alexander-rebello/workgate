@@ -1,5 +1,7 @@
 import { build } from 'esbuild';
-import { chmodSync, mkdirSync } from 'node:fs';
+import { chmodSync, mkdirSync, readFileSync } from 'node:fs';
+
+const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 mkdirSync('bin', { recursive: true });
 
@@ -12,6 +14,7 @@ await build({
   target: 'node20',
   minify: false,
   legalComments: 'none',
+  define: { __WG_VERSION__: JSON.stringify(version) },
   banner: {
     js: [
       '#!/usr/bin/env node',

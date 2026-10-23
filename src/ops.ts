@@ -146,7 +146,9 @@ export async function claimItem(repo: Repo, id: number): Promise<ClaimResult> {
       throw new WgError(`#${id} waits on ${pending.map((p) => `#${p}`).join(', ')}.`);
     }
     if (item.meta.kind === 'decision') {
-      throw new WgError('Decision items are answered, not claimed. Use "wg done" with an outcome.');
+      throw new WgError(
+        `Decision items are answered, not claimed. Use: wg done ${id} --outcome "<answer>" (--report "<sentence>" | --no-report).`,
+      );
     }
 
     const branch = `${id}-${slugify(item.meta.title)}`;

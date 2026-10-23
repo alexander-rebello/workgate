@@ -94,9 +94,13 @@ async function resolveItemId(repo: Repo, id: number | undefined): Promise<number
   return item.meta.id;
 }
 
+// Injected by scripts/build.mjs: the bundle is also copied outside the package (statusline install), so package.json is not readable at runtime.
+declare const __WG_VERSION__: string;
+
 const program = new Command();
 program
   .name('wg')
+  .version(__WG_VERSION__)
   .description('File-backed work items that gate changes behind claimed items, worktrees and a verified merge flow.')
   .showHelpAfterError();
 
