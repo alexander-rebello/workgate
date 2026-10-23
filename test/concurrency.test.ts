@@ -10,10 +10,14 @@ afterEach(() => {
   repo.cleanup();
 });
 
+/** Exit code, with stderr kept so a failure in CI says why instead of only showing a 1. */
 function wgAsync(args: string[]): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn('node', [WG, ...args], { cwd: repo.dir, stdio: 'ignore' });
+    const child = spawn('node', [WG, ...args], { cwd: repo.dir, stdio: ['ignore', 'ignore', 'pipe'] });
+    let err = '';
+    child.stderr.on('data', (c: Buffer) => (err += c.toString()));
     child.on('close', (code) => {
+      if (code !== 0) console.error(`wg ${args.join(' ')} exited ${code ?? 'null'}:\n${err}`);
       resolve(code ?? 1);
     });
   });

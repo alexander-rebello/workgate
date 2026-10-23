@@ -12645,7 +12645,7 @@ import { writeFileSync as writeFileSync2, mkdirSync as mkdirSync2 } from "node:f
 import { dirname, join as join2, relative } from "node:path";
 
 // src/state.ts
-import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/classic/external.js
@@ -32445,7 +32445,14 @@ async function withLock(repo, fn) {
       mkdirSync(lock);
       break;
     } catch {
-      if (existsSync(lock) && Date.now() - statSync(lock).mtimeMs > LOCK_STALE_MS) {
+      let age;
+      try {
+        age = Date.now() - statSync(lock).mtimeMs;
+      } catch {
+        if (Date.now() > deadline) throw new WgError("Timed out waiting for the workgate lock.");
+        continue;
+      }
+      if (age > LOCK_STALE_MS) {
         rmSync(lock, { recursive: true, force: true });
         continue;
       }
@@ -32678,7 +32685,7 @@ function writeIndex(repo, items) {
 
 // src/items.ts
 var import_yaml = __toESM(require_dist(), 1);
-import { existsSync as existsSync2, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync, mkdirSync as mkdirSync3, readFileSync as readFileSync2, readdirSync, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 
 // src/types.ts
@@ -32829,7 +32836,7 @@ function loadAll(repo) {
   const dir = todosPath(repo);
   const items = [];
   const errors = [];
-  if (!existsSync2(dir)) return { items, errors };
+  if (!existsSync(dir)) return { items, errors };
   for (const name of readdirSync(dir).sort()) {
     if (!/^\d{4,}-.+\.md$/.test(name)) continue;
     const file2 = join3(dir, name);
@@ -32978,7 +32985,7 @@ async function readStdin() {
 }
 
 // src/hooks.ts
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync4 } from "node:fs";
 import { homedir } from "node:os";
 import { dirname as dirname4, relative as relative4, resolve as resolve2 } from "node:path";
 
@@ -33428,15 +33435,15 @@ function shellWriteTargets(command) {
 // src/ops.ts
 var import_picomatch = __toESM(require_picomatch2(), 1);
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync4, readFileSync as readFileSync4, appendFileSync, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync4, appendFileSync, writeFileSync as writeFileSync4, mkdirSync as mkdirSync4 } from "node:fs";
 import { basename as basename2, dirname as dirname3, join as join5, relative as relative3 } from "node:path";
 
 // src/repo.ts
-import { existsSync as existsSync3, readFileSync as readFileSync3 } from "node:fs";
+import { existsSync as existsSync2, readFileSync as readFileSync3 } from "node:fs";
 import { basename, dirname as dirname2, join as join4, resolve } from "node:path";
 var CONFIG_REL = ".workgate/config.json";
 async function locateGit(cwd) {
-  if (!existsSync3(cwd)) return void 0;
+  if (!existsSync2(cwd)) return void 0;
   const top = await run("git", ["rev-parse", "--show-toplevel"], cwd);
   if (top.code !== 0) return void 0;
   const common = await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd);
@@ -33447,7 +33454,7 @@ async function locateGit(cwd) {
 }
 function readConfig(mainRoot) {
   const file2 = join4(mainRoot, CONFIG_REL);
-  if (!existsSync3(file2)) {
+  if (!existsSync2(file2)) {
     throw new WgError(`No ${CONFIG_REL} in ${mainRoot}. Run "wg init" first.`);
   }
   let raw;
@@ -33465,7 +33472,7 @@ function readConfig(mainRoot) {
 async function tryResolveRepo(cwd) {
   const loc = await locateGit(cwd);
   if (loc === void 0) return void 0;
-  if (!existsSync3(join4(loc.mainRoot, CONFIG_REL))) return void 0;
+  if (!existsSync2(join4(loc.mainRoot, CONFIG_REL))) return void 0;
   return {
     ...loc,
     stateDir: join4(loc.commonDir, "workgate"),
@@ -33586,7 +33593,7 @@ async function claimItem(repo, id) {
     });
     await commitBookkeeping(repo, [next], `wg: claim #${id} ${item.meta.title}`, id);
     try {
-      if (!existsSync4(path2)) {
+      if (!existsSync3(path2)) {
         mkdirSync4(dirname3(path2), { recursive: true });
         if (await branchExists(repo.mainRoot, branch)) {
           await git(repo.mainRoot, ["worktree", "add", path2, branch]);
@@ -33615,7 +33622,7 @@ async function resumeItem(repo, id) {
     }
     touchLease(repo, id);
     const worktreeItem2 = join5(info.path, item.file.slice(repo.mainRoot.length + 1));
-    const body = existsSync4(worktreeItem2) ? parseItem(readFileSync4(worktreeItem2, "utf8"), worktreeItem2).body : item.body;
+    const body = existsSync3(worktreeItem2) ? parseItem(readFileSync4(worktreeItem2, "utf8"), worktreeItem2).body : item.body;
     return { item, worktree: info.path, branch: item.meta.branch, resumed: true, progress: planProgress(body) };
   });
 }
@@ -33718,7 +33725,7 @@ async function worktreeCopy(repo, item) {
   const info = await worktreeOfBranch(repo, item.meta.branch ?? "");
   if (info === void 0) throw new WgError(`Worktree for #${item.meta.id} not found.`);
   const file2 = join5(info.path, repo.config.todosDir, basename2(item.file));
-  if (!existsSync4(file2)) throw new WgError(`${file2} not found in the worktree.`);
+  if (!existsSync3(file2)) throw new WgError(`${file2} not found in the worktree.`);
   return parseItem(readFileSync4(file2, "utf8"), file2);
 }
 var STEP = /^(\s*- \[)([ xX])(\] ?)(.*)$/;
@@ -33876,7 +33883,7 @@ function appendReportLine(repo, report, id) {
   if (repo.config.reportFile === null || report === void 0) return [];
   const reportPath = join5(repo.mainRoot, repo.config.reportFile);
   mkdirSync4(dirname3(reportPath), { recursive: true });
-  const existing = existsSync4(reportPath) ? readFileSync4(reportPath, "utf8") : "";
+  const existing = existsSync3(reportPath) ? readFileSync4(reportPath, "utf8") : "";
   const prefix = existing === "" || existing.endsWith("\n") ? "" : "\n";
   appendFileSync(reportPath, `${prefix}- ${todayIso()} \u2014 ${report.trim()} (#${id})
 `);
@@ -34133,7 +34140,7 @@ function deny(reason) {
 }
 function nearestExistingDir(path2) {
   let dir = dirname4(path2);
-  while (!existsSync5(dir) && dirname4(dir) !== dir) dir = dirname4(dir);
+  while (!existsSync4(dir) && dirname4(dir) !== dir) dir = dirname4(dir);
   return dir;
 }
 var ITEM_FILES_HELP = "Workgate: item files and the index are read-only for agents. Edit the plan with wg plan check|uncheck <n> or wg body --set (stdin); change status with the wg commands.";
@@ -34309,11 +34316,11 @@ async function runHook(name, rawInput) {
 }
 
 // src/init.ts
-import { appendFileSync as appendFileSync2, existsSync as existsSync6, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
+import { appendFileSync as appendFileSync2, existsSync as existsSync5, mkdirSync as mkdirSync5, readFileSync as readFileSync5, writeFileSync as writeFileSync5 } from "node:fs";
 import { join as join6, relative as relative5 } from "node:path";
 function detectGates(root) {
   const pkgFile = join6(root, "package.json");
-  if (!existsSync6(pkgFile)) return [];
+  if (!existsSync5(pkgFile)) return [];
   let scripts = {};
   try {
     const pkg = JSON.parse(readFileSync5(pkgFile, "utf8"));
@@ -34321,7 +34328,7 @@ function detectGates(root) {
   } catch {
     return [];
   }
-  const runner = existsSync6(join6(root, "pnpm-lock.yaml")) ? "pnpm run" : existsSync6(join6(root, "yarn.lock")) ? "yarn" : "npm run";
+  const runner = existsSync5(join6(root, "pnpm-lock.yaml")) ? "pnpm run" : existsSync5(join6(root, "yarn.lock")) ? "yarn" : "npm run";
   return ["lint", "build", "test"].filter((name) => typeof scripts[name] === "string").map((name) => ({ name, command: `${runner} ${name}` }));
 }
 var CLAUDE_MD_SECTION = `
@@ -34336,7 +34343,7 @@ async function initRepo(cwd, options) {
   if (loc.toplevel !== loc.mainRoot) throw new WgError('Run "wg init" from the main checkout, not a worktree.');
   const log = [];
   const configFile = join6(loc.mainRoot, CONFIG_REL);
-  if (existsSync6(configFile)) {
+  if (existsSync5(configFile)) {
     log.push(`${CONFIG_REL} already exists; left unchanged.`);
   } else {
     const branch = options.branch ?? await currentBranch(loc.mainRoot);
@@ -34354,13 +34361,13 @@ async function initRepo(cwd, options) {
   const repo = { ...loc, stateDir: join6(loc.commonDir, "workgate"), config: config2 };
   mkdirSync5(join6(loc.mainRoot, config2.todosDir), { recursive: true });
   const keep = join6(loc.mainRoot, config2.todosDir, ".gitkeep");
-  if (!existsSync6(keep)) writeFileSync5(keep, "");
+  if (!existsSync5(keep)) writeFileSync5(keep, "");
   const { items } = loadAll(repo);
   const indexRel = writeIndex(repo, items);
   const paths = [CONFIG_REL, relative5(loc.mainRoot, keep), indexRel];
   if (options.claudeMd) {
     const claudeMd = join6(loc.mainRoot, "CLAUDE.md");
-    if (!existsSync6(claudeMd) || !readFileSync5(claudeMd, "utf8").includes("(workgate)")) {
+    if (!existsSync5(claudeMd) || !readFileSync5(claudeMd, "utf8").includes("(workgate)")) {
       appendFileSync2(claudeMd, CLAUDE_MD_SECTION);
       paths.push("CLAUDE.md");
       log.push("Added a workgate section to CLAUDE.md.");
@@ -34457,7 +34464,7 @@ async function renderStatusline(rawInput, nowSeconds = Math.floor(Date.now() / 1
 }
 
 // src/statusline-install.ts
-import { chmodSync, copyFileSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync6, realpathSync, writeFileSync as writeFileSync6 } from "node:fs";
+import { chmodSync, copyFileSync, existsSync as existsSync6, mkdirSync as mkdirSync6, readFileSync as readFileSync6, realpathSync, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname5, join as join7 } from "node:path";
 var SettingsSchema = external_exports.record(external_exports.string(), external_exports.unknown());
@@ -34469,7 +34476,7 @@ function installStatusline(scriptPath, options) {
   const target = join7(targetDir, "wg");
   const log = [];
   let settings = {};
-  if (existsSync7(settingsFile)) {
+  if (existsSync6(settingsFile)) {
     let raw;
     try {
       raw = JSON.parse(readFileSync6(settingsFile, "utf8"));
