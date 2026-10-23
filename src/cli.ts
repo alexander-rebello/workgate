@@ -18,7 +18,9 @@ import {
   markSteps,
   planSteps,
   readBody,
+  readBodyById,
   setBody,
+  setBodyById,
   releaseItem,
   requireItemForCwd,
   resumeItem,
@@ -115,7 +117,7 @@ program
   .argument('<title>')
   .addOption(new Option('--kind <kind>', 'bug | feature | rework | decision').choices(KINDS).makeOptionMandatory())
   .addOption(new Option('--sev <sev>', 'severity for bugs').choices(SEVERITIES))
-  .option('--body <text>', 'item body (default: a template for the kind)')
+  .option('--body <text>', 'item body; otherwise read from stdin (default: a template for the kind)')
   .option('--after <ids>', 'comma-separated ids this item depends on', parseIds)
   .option('--parent <id>', 'parent item id', parseId)
   .option('--needs <text>', 'create the item blocked, stating what the owner must provide')
@@ -340,17 +342,19 @@ program
 
 program
   .command('body')
-  .description("Print the current item's body, or replace it from stdin with --set")
+  .description("Print an item's body, or replace it from stdin with --set (default: the current worktree's item)")
+  .argument('[id]', 'item id; --set with an id only works for items that were never claimed', parseId)
   .option('--set', 'replace the body with stdin')
-  .action(async (opts: { set?: boolean }) => {
+  .action(async (id: number | undefined, opts: { set?: boolean }) => {
     const repo = await repoForCwd();
     if (opts.set === true) {
       const text = await readStdin();
       if (text.trim() === '') throw new WgError('Refusing to set an empty body; pipe the new body on stdin.');
-      await setBody(repo, process.cwd(), text);
+      if (id === undefined) await setBody(repo, process.cwd(), text);
+      else await setBodyById(repo, id, text);
       print('Body updated.');
     } else {
-      print(await readBody(repo, process.cwd()));
+      print(id === undefined ? await readBody(repo, process.cwd()) : await readBodyById(repo, id));
     }
   });
 
