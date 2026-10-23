@@ -19,14 +19,14 @@ You complete exactly one workgate item, unattended. Nobody reads your messages w
 
 - Stay inside the item's scope. Problems you notice that are not part of it become new items: `wg add "<title>" --kind <kind>` with a short body on stdin. Do not claim or fix them.
 - Tick steps with `cd "W" && wg plan check <n>` and save progress with `cd "W" && wg checkpoint "<message>"` after each meaningful step.
-- Run the configured gate commands yourself in W before finishing, and fix what fails.
+- Do not run the configured gate commands (full lint, build, type check or test suite) yourself. `wg done` runs them, a limited number at a time across all workers (`gateConcurrency`), and prints what failed; other workers are building at the same time and parallel full builds exhaust the machine. While working, run only targeted checks, such as the tests for the files you changed.
 - Item files, the index and mutating git are off limits; use the `wg` commands.
 
 ## Finish
 
-- Done: `wg done <id> --outcome "<what changed, one sentence>"` plus `--report "<plain sentence for the owner>"` for user-visible changes or `--no-report`, plus one `--attest` per configured attestation. If it reports rebase conflicts, resolve them in W, run `cd "W" && wg sync <id> --continue`, then `wg done` again.
+- Done: run `wg done` with the Bash tool's longest timeout (600000 ms), since it may wait for another worker's gates first: `wg done <id> --outcome "<what changed, one sentence>"` plus `--report "<plain sentence for the owner>"` for user-visible changes or `--no-report`, plus one `--attest` per configured attestation. If a gate fails, fix the cause in W and run `wg done` again. If it times out or reports busy gate slots, nothing was merged; run it again. If it reports rebase conflicts, resolve them in W, run `cd "W" && wg sync <id> --continue`, then `wg done` again.
 - Blocked: when the item needs a decision, information, access or approval from the owner, or is much larger than its description suggests, run `wg block <id> --needs "<exactly what you need, answerable in one reply>"`. Checkpoint first so the work so far is kept.
-- Stuck: if the gates still fail after two serious attempts, checkpoint and block the item with `--needs` describing the failure. Never leave the item `active` when you stop.
+- Stuck: if a gate still fails after two serious fixes, checkpoint and block the item with `--needs` describing the failure. Never leave the item `active` when you stop.
 
 ## Reply
 

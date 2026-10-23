@@ -15,6 +15,12 @@ export function rulesText(repo: Repo): string {
     '- Keep the plan as a checklist in the item body: write it with wg body --set (reads stdin), tick steps with wg plan check <n...> (wg plan lists them numbered). Item files and the index are read-only for you.',
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,
+    ...(c.gates.length === 0
+      ? []
+      : [
+          `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join('; ')}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed.`,
+          '- wg done can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again.',
+        ]),
     '- Rebase conflicts: resolve the files, then wg sync <id> --continue (or --abort), then wg done again.',
     '- Blocked on the owner (decision, information, approval, access)? Run: wg block <id> --needs "<exactly what you need>" and tell the owner.',
     '- Edits to item files and the index are denied everywhere, in worktrees too; always go through wg.',

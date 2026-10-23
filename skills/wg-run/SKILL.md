@@ -12,7 +12,7 @@ If `command -v wg` fails, the repo has no `.workgate/config.json`, or no `wg-wor
 ## Arguments
 
 - a number: stop after that many items (default: no limit).
-- `--parallel <k>`: run up to k workers at a time (default 1, at most 3). Every `wg done` merges into the integration branch, so parallel workers on overlapping code cause rebase conflicts; suggest it only for items in separate areas.
+- `--parallel <k>`: run up to k workers at a time (default 1, at most 3). Every `wg done` merges into the integration branch, so parallel workers on overlapping code cause rebase conflicts; suggest it only for items in separate areas. Gates still run only `gateConcurrency` at a time (default 1); the other workers' `wg done` waits, so more workers mostly parallelize the coding, not the builds.
 
 ## 1. Preflight
 
