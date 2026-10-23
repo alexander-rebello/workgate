@@ -34095,8 +34095,15 @@ async function preToolUse(input2) {
   if (tool === "Bash") return await gateBash(input2) ?? {};
   return {};
 }
+function workDir(input2) {
+  const cwd = input2.cwd ?? process.cwd();
+  if (!WRITE_TOOLS.has(input2.tool_name ?? "")) return cwd;
+  const ti = input2.tool_input ?? {};
+  const raw = ti["file_path"] ?? ti["notebook_path"];
+  return typeof raw === "string" ? nearestExistingDir(resolve2(cwd, raw)) : cwd;
+}
 async function postToolUse(input2) {
-  const repo = await tryResolveRepo(input2.cwd ?? process.cwd());
+  const repo = await tryResolveRepo(workDir(input2));
   if (repo === void 0) return {};
   const current = await itemFor(repo);
   if (current === void 0) return {};

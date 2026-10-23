@@ -214,8 +214,21 @@ async function preToolUse(input: HookInput): Promise<HookOutput> {
   return {};
 }
 
+/**
+ * The directory a tool call worked in. A file tool counts for the file it touched, not the session cwd:
+ * a subagent dispatched from the main checkout edits its item's worktree by absolute path, and that
+ * item's lease must stay fresh.
+ */
+function workDir(input: HookInput): string {
+  const cwd = input.cwd ?? process.cwd();
+  if (!WRITE_TOOLS.has(input.tool_name ?? '')) return cwd;
+  const ti = input.tool_input ?? {};
+  const raw = ti['file_path'] ?? ti['notebook_path'];
+  return typeof raw === 'string' ? nearestExistingDir(resolve(cwd, raw)) : cwd;
+}
+
 async function postToolUse(input: HookInput): Promise<HookOutput> {
-  const repo = await tryResolveRepo(input.cwd ?? process.cwd());
+  const repo = await tryResolveRepo(workDir(input));
   if (repo === undefined) return {};
   const current = await itemFor(repo);
   if (current === undefined) return {};

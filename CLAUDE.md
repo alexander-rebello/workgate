@@ -33,6 +33,7 @@ workgate is a file-backed work item tracker (CLI `wg`) plus a Claude Code plugin
 - `src/hooks.ts`: `wg hook <session-start|user-prompt-submit|pre-tool-use|post-tool-use|session-end>`. Reads Claude Code hook JSON from stdin, emits allow/deny/context JSON. Policy lives here and in `src/guard.ts`.
 - `src/statusline.ts` / `statusline-install.ts`: status line renderer and its installer.
 - `skills/wg/SKILL.md`: the `/wg` skill, a front end that only shells out to the CLI.
+- `skills/wg-run/SKILL.md` + `agents/wg-worker.md`: `/wg-run`, an orchestrator that hands each ready item to a fresh `wg-worker` subagent. Workers edit worktrees by absolute path from the main checkout's cwd, which is why the post-tool-use heartbeat resolves the item from a file tool's path.
 
 Core modules:
 
