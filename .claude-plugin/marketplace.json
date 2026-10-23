@@ -8,7 +8,7 @@
       "name": "workgate",
       "source": "./",
       "description": "Gate every change behind a claimed work item with worktrees, a verified merge flow and session hooks.",
-      "version": "0.1.4"
+      "version": "0.1.5"
     }
   ],
   "description": "Workgate: gate every change behind a claimed work item."
