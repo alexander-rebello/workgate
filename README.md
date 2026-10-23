@@ -80,6 +80,8 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
   "leaseMinutes": 30,
   "commitSuffix": "",
   "gates": [{ "name": "lint", "command": "pnpm run lint" }],
+  "gateConcurrency": 1,
+  "gateWaitMinutes": 8,
   "attestations": [
     {
       "name": "docs",
@@ -91,7 +93,8 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 }
 ```
 
-- `gates` run in the item worktree before a merge; any failure aborts and merges nothing.
+- `gates` run in the item worktree before a merge; any failure aborts and merges nothing. Agents are told not to run them themselves.
+- `gateConcurrency` limits how many `wg done` calls run their gates at the same time, across all sessions on the machine (default 1). The others wait in line, printing who holds the slots, for up to `gateWaitMinutes` (default 8). After that they give up without merging. A slot whose process died is reclaimed, and interrupting `wg done` stops its gate commands. Gates run without the repository lock, so other `wg` commands keep working during a long build. If the integration branch moved in the meantime, `wg done` rebases and runs the gates again before merging.
 - `attestations` become mandatory `--attest name=ok|n/a|unchanged` answers on `wg done`. `n/a` is refused when a `watch` file changed and no `require` file did; `ok` is refused when no `require` file changed. `unchanged` means the `require` files were reviewed and already cover the change; it needs `--attest-reason name="<why>"`, which is recorded in the item (`attestReason`) and the merge commit body.
 - `commitSuffix` is appended to bookkeeping commit subjects (for example ` [skip ci]`). The merge commit written by `wg done` never gets it, since it carries the real change and is what a push ships.
 - `reportFile`, when set, receives a `- date - text (#id)` line for every `--report`.

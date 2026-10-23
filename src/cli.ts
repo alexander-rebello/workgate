@@ -418,7 +418,7 @@ program
       noReport: opts.report === false,
       attest: opts.attest,
       attestReason: opts.attestReason,
-    });
+    }, (line) => process.stderr.write(`${line}\n`));
     for (const line of result.log) print(line);
     print(`Done #${itemId}.`);
   });

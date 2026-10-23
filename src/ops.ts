@@ -5,7 +5,7 @@ import picomatch from 'picomatch';
 import { nextItems, planProgress } from './derive.js';
 import { WgError } from './errors.js';
 
-import { run, runShell } from './exec.js';
+import { killActiveShells, run, runShell } from './exec.js';
 import {
   branchExists,
   changedFiles,
@@ -30,7 +30,7 @@ import {
   writeItem,
 } from './items.js';
 import { worktreeRoot } from './repo.js';
-import { clearLease, touchLease, withLock } from './state.js';
+import { clearLease, touchLease, withGateSlot, withLock } from './state.js';
 import type { Item, ItemMeta, Kind, Repo, Severity } from './types.js';
 
 const KIND_TEMPLATES: Record<Kind, string> = {
@@ -519,9 +519,10 @@ function appendReportLine(repo: Repo, report: string | undefined, id: number): s
   return [repo.config.reportFile];
 }
 
-async function runGates(repo: Repo, cwd: string, log: string[]): Promise<void> {
+async function runGates(repo: Repo, cwd: string, log: string[], progress: (line: string) => void): Promise<void> {
   for (const gate of repo.config.gates) {
     log.push(`gate ${gate.name}: ${gate.command}`);
+    progress(`running gate ${gate.name}...`);
     const result = await runShell(gate.command, cwd);
     if (result.code !== 0) {
       const tail = result.output.trimEnd().split('\n').slice(-40).join('\n');
@@ -530,109 +531,188 @@ async function runGates(repo: Repo, cwd: string, log: string[]): Promise<void> {
   }
 }
 
-export async function doneItem(repo: Repo, id: number, options: DoneOptions): Promise<DoneResult> {
-  return withLock(repo, async () => {
-    await requireIntegration(repo);
-    const log: string[] = [];
-    const items = loadItems(repo);
-    const item = findItem(items, id);
+/** Rebasing and gating again when the integration branch moves during the gates; bounded so a busy branch cannot loop forever. */
+const DONE_ATTEMPTS = 3;
 
-    if (options.report === undefined && !options.noReport) {
-      throw new WgError('Pass --report "<plain sentence>" for user-visible changes, or --no-report.');
-    }
-    if (options.report !== undefined && options.noReport) throw new WgError('Use either --report or --no-report.');
+interface DonePrepared {
+  branch: string;
+  worktree: string;
+  /** Integration branch commit the gates are checked against. */
+  base: string;
+  /** Item branch commit the gates ran on. */
+  head: string;
+}
 
-    if (item.meta.status !== 'active') {
-      if (item.meta.kind === 'decision' && (item.meta.status === 'blocked' || item.meta.status === 'todo')) {
-        const next = writeItem(
-          item,
-          withoutKeys(
-            {
-              ...item.meta,
-              status: 'done',
-              closed: todayIso(),
-              outcome: options.outcome.trim(),
-              ...(options.report === undefined ? {} : { report: options.report.trim() }),
-            },
-            ['needs'],
-          ),
-        );
-        const extra = appendReportLine(repo, options.report, id);
-        await commitBookkeeping(repo, [next], `wg: decide #${id} ${item.meta.title}`, id, extra);
-        log.push(`Decision #${id} recorded.`);
-        return { item: next, log };
-      }
-      throw new WgError(`#${id} is ${item.meta.status}. Claim it first with "wg claim ${id}".`);
-    }
-    const branch = item.meta.branch;
-    if (branch === undefined) throw new WgError(`#${id} has no branch.`);
-    if (!(await isCleanTracked(repo.mainRoot))) {
-      throw new WgError('The main checkout has uncommitted changes. Commit or stash them, then retry.');
-    }
-    const info = await worktreeOfBranch(repo, branch);
-    if (info === undefined) throw new WgError(`Worktree for #${id} not found.`);
+function validateDoneOptions(options: DoneOptions): void {
+  if (options.report === undefined && !options.noReport) {
+    throw new WgError('Pass --report "<plain sentence>" for user-visible changes, or --no-report.');
+  }
+  if (options.report !== undefined && options.noReport) throw new WgError('Use either --report or --no-report.');
+}
 
-    const sync = await syncItem(repo, item, 'start');
-    if (!sync.ok) {
-      throw new WgError(
-        `Rebase onto ${repo.config.integrationBranch} has conflicts in:\n${sync.conflicts.join('\n')}\nResolve the files, then run "wg sync ${id} --continue" (or "wg sync ${id} --abort"), then "wg done" again.`,
-      );
-    }
-    log.push(`rebased ${branch} onto ${repo.config.integrationBranch}`);
-
-    await runGates(repo, info.path, log);
-
-    const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
-    if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
-    const reasons = trimmedReasons(options.attestReason ?? {});
-    const problems = checkAttestations(repo, options.attest, files, reasons);
-    if (problems.length > 0) throw new WgError(problems.join('\n'));
-    const unchanged = Object.entries(options.attest).filter(([, value]) => value === 'unchanged');
-
-    const overlaps = await overlapWarnings(repo, items, item, files);
-    log.push(...overlaps);
-
-    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
-    const merge = await gitOkOutput(repo.mainRoot, ['merge', '--no-ff', '--no-commit', branch]);
-    if (!merge.ok) {
-      await gitOk(repo.mainRoot, ['merge', '--abort']);
-      throw new WgError(`Merge into ${repo.config.integrationBranch} failed and was aborted:\n${merge.output}`);
-    }
-    try {
-      const merged = findItem(loadItems(repo), id);
-      const closedMeta = withoutKeys(
+/**
+ * Rebase, run gates, merge, close. The gates run outside the repository lock (in a gate slot, see
+ * withGateSlot) so a long build neither blocks every other wg command nor outlives the lock's stale
+ * timeout; the merge re-checks under the lock that nothing moved meanwhile.
+ */
+export async function doneItem(
+  repo: Repo,
+  id: number,
+  options: DoneOptions,
+  progress: (line: string) => void = () => undefined,
+): Promise<DoneResult> {
+  validateDoneOptions(options);
+  const log: string[] = [];
+  for (let attempt = 1; ; attempt++) {
+    const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
+    if ('item' in prepared) return prepared;
+    if (repo.config.gates.length > 0) {
+      await withGateSlot(
+        repo,
+        id,
         {
-          ...merged.meta,
-          status: 'done',
-          closed: todayIso(),
-          outcome: options.outcome.trim(),
-          ...(options.report === undefined ? {} : { report: options.report.trim() }),
-          ...(Object.keys(options.attest).length === 0 ? {} : { attest: options.attest }),
-          ...(Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }),
+          onWait: (holders) => {
+            const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(', ');
+            progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === '' ? '' : `: ${busy}`})...`);
+          },
+          onAbort: killActiveShells,
         },
-        ['wt', 'branch', 'needs'],
+        () => runGates(repo, prepared.worktree, log, progress),
       );
-      const next = writeItem(merged, closedMeta);
-      const all = loadItems(repo);
-      const indexRel = writeIndex(repo, all);
-      const paths = [relative(repo.mainRoot, next.file), indexRel];
-      paths.push(...appendReportLine(repo, options.report, id));
-      await git(repo.mainRoot, ['add', '--all', '--', ...paths]);
-      const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ''}`);
-      const body = [...attestLines, `Todo: #${id}`].join('\n');
-      await git(repo.mainRoot, ['commit', '--no-verify', '-m', `${mergeMsg}\n\n${body}`]);
-      log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
-      await git(repo.mainRoot, ['worktree', 'remove', '--force', info.path]);
-      await git(repo.mainRoot, ['branch', '-d', branch]);
-      clearLease(repo, id);
-      log.push('removed worktree and branch');
-      log.push(`The worktree is gone; continue from ${repo.mainRoot}.`);
-      return { item: next, log };
-    } catch (error) {
-      await gitOk(repo.mainRoot, ['merge', '--abort']);
-      throw error;
     }
-  });
+    const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
+    if (finished !== 'moved') return finished;
+    if (attempt >= DONE_ATTEMPTS) {
+      throw new WgError(
+        `${repo.config.integrationBranch} moved during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`,
+      );
+    }
+    log.push(`${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again`);
+    progress(log[log.length - 1] ?? '');
+  }
+}
+
+async function prepareDone(repo: Repo, id: number, options: DoneOptions, log: string[]): Promise<DonePrepared | DoneResult> {
+  await requireIntegration(repo);
+  const item = findItem(loadItems(repo), id);
+
+  if (item.meta.status !== 'active') {
+    if (item.meta.kind === 'decision' && (item.meta.status === 'blocked' || item.meta.status === 'todo')) {
+      const next = writeItem(
+        item,
+        withoutKeys(
+          {
+            ...item.meta,
+            status: 'done',
+            closed: todayIso(),
+            outcome: options.outcome.trim(),
+            ...(options.report === undefined ? {} : { report: options.report.trim() }),
+          },
+          ['needs'],
+        ),
+      );
+      const extra = appendReportLine(repo, options.report, id);
+      await commitBookkeeping(repo, [next], `wg: decide #${id} ${item.meta.title}`, id, extra);
+      log.push(`Decision #${id} recorded.`);
+      return { item: next, log };
+    }
+    throw new WgError(`#${id} is ${item.meta.status}. Claim it first with "wg claim ${id}".`);
+  }
+  const branch = item.meta.branch;
+  if (branch === undefined) throw new WgError(`#${id} has no branch.`);
+  if (!(await isCleanTracked(repo.mainRoot))) {
+    throw new WgError('The main checkout has uncommitted changes. Commit or stash them, then retry.');
+  }
+  const info = await worktreeOfBranch(repo, branch);
+  if (info === undefined) throw new WgError(`Worktree for #${id} not found.`);
+
+  const sync = await syncItem(repo, item, 'start');
+  if (!sync.ok) {
+    throw new WgError(
+      `Rebase onto ${repo.config.integrationBranch} has conflicts in:\n${sync.conflicts.join('\n')}\nResolve the files, then run "wg sync ${id} --continue" (or "wg sync ${id} --abort"), then "wg done" again.`,
+    );
+  }
+  log.push(`rebased ${branch} onto ${repo.config.integrationBranch}`);
+  const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
+  if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
+  const reasons = trimmedReasons(options.attestReason ?? {});
+  const problems = checkAttestations(repo, options.attest, files, reasons);
+  if (problems.length > 0) throw new WgError(problems.join('\n'));
+  return {
+    branch,
+    worktree: info.path,
+    base: await git(repo.mainRoot, ['rev-parse', repo.config.integrationBranch]),
+    head: await git(repo.mainRoot, ['rev-parse', branch]),
+  };
+}
+
+async function finishDone(
+  repo: Repo,
+  id: number,
+  options: DoneOptions,
+  prepared: DonePrepared,
+  log: string[],
+): Promise<DoneResult | 'moved'> {
+  await requireIntegration(repo);
+  const items = loadItems(repo);
+  const item = findItem(items, id);
+  const { branch } = prepared;
+  if (item.meta.status !== 'active' || item.meta.branch !== branch) {
+    throw new WgError(`#${id} changed to ${item.meta.status} while its gates ran. Nothing was merged.`);
+  }
+  const info = await worktreeOfBranch(repo, branch);
+  if (info === undefined) throw new WgError(`Worktree for #${id} disappeared while its gates ran. Nothing was merged.`);
+  if ((await git(repo.mainRoot, ['rev-parse', branch])) !== prepared.head) {
+    throw new WgError(`${branch} got new commits while its gates ran. Nothing was merged; run wg done again.`);
+  }
+  if ((await git(repo.mainRoot, ['rev-parse', repo.config.integrationBranch])) !== prepared.base) return 'moved';
+  if (!(await isCleanTracked(repo.mainRoot))) {
+    throw new WgError('The main checkout has uncommitted changes. Commit or stash them, then retry.');
+  }
+
+  const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
+  const reasons = trimmedReasons(options.attestReason ?? {});
+  const unchanged = Object.entries(options.attest).filter(([, value]) => value === 'unchanged');
+  log.push(...(await overlapWarnings(repo, items, item, files)));
+
+  const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
+  const merge = await gitOkOutput(repo.mainRoot, ['merge', '--no-ff', '--no-commit', branch]);
+  if (!merge.ok) {
+    await gitOk(repo.mainRoot, ['merge', '--abort']);
+    throw new WgError(`Merge into ${repo.config.integrationBranch} failed and was aborted:\n${merge.output}`);
+  }
+  try {
+    const closedMeta = withoutKeys(
+      {
+        ...item.meta,
+        status: 'done',
+        closed: todayIso(),
+        outcome: options.outcome.trim(),
+        ...(options.report === undefined ? {} : { report: options.report.trim() }),
+        ...(Object.keys(options.attest).length === 0 ? {} : { attest: options.attest }),
+        ...(Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }),
+      },
+      ['wt', 'branch', 'needs'],
+    );
+    const next = writeItem(findItem(loadItems(repo), id), closedMeta);
+    const indexRel = writeIndex(repo, loadItems(repo));
+    const paths = [relative(repo.mainRoot, next.file), indexRel];
+    paths.push(...appendReportLine(repo, options.report, id));
+    await git(repo.mainRoot, ['add', '--all', '--', ...paths]);
+    const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ''}`);
+    const body = [...attestLines, `Todo: #${id}`].join('\n');
+    await git(repo.mainRoot, ['commit', '--no-verify', '-m', `${mergeMsg}\n\n${body}`]);
+    log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
+    await git(repo.mainRoot, ['worktree', 'remove', '--force', info.path]);
+    await git(repo.mainRoot, ['branch', '-d', branch]);
+    clearLease(repo, id);
+    log.push('removed worktree and branch');
+    log.push(`The worktree is gone; continue from ${repo.mainRoot}.`);
+    return { item: next, log };
+  } catch (error) {
+    await gitOk(repo.mainRoot, ['merge', '--abort']);
+    throw error;
+  }
 }
 
 async function gitOkOutput(cwd: string, args: readonly string[]): Promise<{ ok: boolean; output: string }> {

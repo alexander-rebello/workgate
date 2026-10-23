@@ -92,6 +92,10 @@ export const ConfigSchema = z
     /** Appended to every bookkeeping commit message, e.g. " [skip ci]". */
     commitSuffix: z.string().default(''),
     gates: z.array(GateSchema).default([]),
+    /** How many `wg done` calls may run their gates at the same time; the rest wait for a slot. */
+    gateConcurrency: z.number().int().positive().default(1),
+    /** How long `wg done` waits for a free gate slot before giving up without merging. */
+    gateWaitMinutes: z.number().positive().default(8),
     attestations: z.array(AttestationSchema).default([]),
   })
   .strict();

@@ -12550,9 +12550,23 @@ function run(command, args, cwd) {
     );
   });
 }
+var activeShells = /* @__PURE__ */ new Set();
+function killActiveShells() {
+  for (const pid of activeShells) {
+    try {
+      process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
+    } catch {
+    }
+  }
+  activeShells.clear();
+}
 function runShell(command, cwd) {
   return new Promise((resolve3) => {
-    const child = spawn(command, { cwd, shell: true, env: process.env });
+    const child = spawn(command, { cwd, shell: true, env: process.env, detached: process.platform !== "win32" });
+    if (child.pid !== void 0) activeShells.add(child.pid);
+    const forget = () => {
+      if (child.pid !== void 0) activeShells.delete(child.pid);
+    };
     let output2 = "";
     let stdout = "";
     let stderr = "";
@@ -12567,9 +12581,11 @@ function runShell(command, cwd) {
       stderr += text;
     });
     child.on("error", (error62) => {
+      forget();
       resolve3({ code: 1, stdout, stderr: error62.message, output: error62.message });
     });
     child.on("close", (code) => {
+      forget();
       resolve3({ code: code ?? 1, stdout, stderr, output: output2 });
     });
   });
@@ -32443,6 +32459,100 @@ async function withLock(repo, fn) {
     rmSync(lock, { recursive: true, force: true });
   }
 }
+var GateSlotSchema = external_exports.object({ pid: external_exports.number().int(), id: external_exports.number().int(), started: external_exports.string() });
+var GATE_SLOT_UNOWNED_STALE_MS = 3e4;
+var GATE_SLOT_MAX_MS = 6 * 60 * 6e4;
+var GATE_POLL_MS = 1e3;
+var GATE_NOTICE_EVERY_MS = 6e4;
+function pidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error62) {
+    return error62.code === "EPERM";
+  }
+}
+function readSlot(dir) {
+  try {
+    const parsed = GateSlotSchema.safeParse(JSON.parse(readFileSync(join(dir, "owner.json"), "utf8")));
+    return parsed.success ? parsed.data : void 0;
+  } catch {
+    return void 0;
+  }
+}
+function slotStale(dir) {
+  const owner = readSlot(dir);
+  if (owner === void 0) {
+    try {
+      return Date.now() - statSync(dir).mtimeMs > GATE_SLOT_UNOWNED_STALE_MS;
+    } catch {
+      return true;
+    }
+  }
+  return !pidAlive(owner.pid) || Date.now() - new Date(owner.started).getTime() > GATE_SLOT_MAX_MS;
+}
+function gateHolders(root, limit) {
+  const holders = [];
+  for (let i = 0; i < limit; i++) {
+    const owner = readSlot(join(root, `slot-${i}`));
+    if (owner !== void 0) {
+      holders.push({ id: owner.id, minutes: Math.floor((Date.now() - new Date(owner.started).getTime()) / 6e4) });
+    }
+  }
+  return holders;
+}
+function describeHolders(holders) {
+  return holders.length === 0 ? "starting up" : holders.map((h) => `#${h.id} for ${h.minutes}m`).join(", ");
+}
+async function withGateSlot(repo, id, options, fn) {
+  const limit = repo.config.gateConcurrency;
+  const root = join(repo.stateDir, "gates");
+  ensure(root);
+  const deadline = Date.now() + repo.config.gateWaitMinutes * 6e4;
+  let nextNotice = 0;
+  let slot;
+  while (slot === void 0) {
+    for (let i = 0; i < limit && slot === void 0; i++) {
+      const dir = join(root, `slot-${i}`);
+      try {
+        mkdirSync(dir);
+        writeFileSync(join(dir, "owner.json"), JSON.stringify({ pid: process.pid, id, started: (/* @__PURE__ */ new Date()).toISOString() }));
+        slot = dir;
+      } catch {
+        if (slotStale(dir)) {
+          rmSync(dir, { recursive: true, force: true });
+          i--;
+        }
+      }
+    }
+    if (slot !== void 0) break;
+    const holders = gateHolders(root, limit);
+    if (Date.now() > deadline) {
+      throw new WgError(
+        `All ${limit} gate slot(s) are still busy (${describeHolders(holders)}) after ${repo.config.gateWaitMinutes}m. Nothing was merged; run wg done again.`
+      );
+    }
+    if (Date.now() >= nextNotice) {
+      options.onWait?.(holders);
+      nextNotice = Date.now() + GATE_NOTICE_EVERY_MS;
+    }
+    await sleep(GATE_POLL_MS);
+  }
+  const held = slot;
+  const signals = ["SIGINT", "SIGTERM", "SIGHUP"];
+  const onSignal = (signal) => {
+    options.onAbort?.();
+    rmSync(held, { recursive: true, force: true });
+    process.exit(signal === "SIGINT" ? 130 : 143);
+  };
+  for (const s of signals) process.on(s, onSignal);
+  try {
+    return await fn();
+  } finally {
+    for (const s of signals) process.off(s, onSignal);
+    rmSync(held, { recursive: true, force: true });
+  }
+}
 
 // src/derive.ts
 function computeStats(repo, items) {
@@ -32642,6 +32752,10 @@ var ConfigSchema = external_exports.object({
   /** Appended to every bookkeeping commit message, e.g. " [skip ci]". */
   commitSuffix: external_exports.string().default(""),
   gates: external_exports.array(GateSchema).default([]),
+  /** How many `wg done` calls may run their gates at the same time; the rest wait for a slot. */
+  gateConcurrency: external_exports.number().int().positive().default(1),
+  /** How long `wg done` waits for a free gate slot before giving up without merging. */
+  gateWaitMinutes: external_exports.number().positive().default(8),
   attestations: external_exports.array(AttestationSchema).default([])
 }).strict();
 
@@ -32881,6 +32995,10 @@ function rulesText(repo) {
     "- Keep the plan as a checklist in the item body: write it with wg body --set (reads stdin), tick steps with wg plan check <n...> (wg plan lists them numbered). Item files and the index are read-only for you.",
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,
+    ...c.gates.length === 0 ? [] : [
+      `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join("; ")}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed.`,
+      "- wg done can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again."
+    ],
     "- Rebase conflicts: resolve the files, then wg sync <id> --continue (or --abort), then wg done again.",
     '- Blocked on the owner (decision, information, approval, access)? Run: wg block <id> --needs "<exactly what you need>" and tell the owner.',
     "- Edits to item files and the index are denied everywhere, in worktrees too; always go through wg.",
@@ -33764,9 +33882,10 @@ function appendReportLine(repo, report, id) {
 `);
   return [repo.config.reportFile];
 }
-async function runGates(repo, cwd, log) {
+async function runGates(repo, cwd, log, progress) {
   for (const gate of repo.config.gates) {
     log.push(`gate ${gate.name}: ${gate.command}`);
+    progress(`running gate ${gate.name}...`);
     const result = await runShell(gate.command, cwd);
     if (result.code !== 0) {
       const tail = result.output.trimEnd().split("\n").slice(-40).join("\n");
@@ -33775,107 +33894,159 @@ ${tail}`);
     }
   }
 }
-async function doneItem(repo, id, options) {
-  return withLock(repo, async () => {
-    await requireIntegration(repo);
-    const log = [];
-    const items = loadItems(repo);
-    const item = findItem(items, id);
-    if (options.report === void 0 && !options.noReport) {
-      throw new WgError('Pass --report "<plain sentence>" for user-visible changes, or --no-report.');
+var DONE_ATTEMPTS = 3;
+function validateDoneOptions(options) {
+  if (options.report === void 0 && !options.noReport) {
+    throw new WgError('Pass --report "<plain sentence>" for user-visible changes, or --no-report.');
+  }
+  if (options.report !== void 0 && options.noReport) throw new WgError("Use either --report or --no-report.");
+}
+async function doneItem(repo, id, options, progress = () => void 0) {
+  validateDoneOptions(options);
+  const log = [];
+  for (let attempt = 1; ; attempt++) {
+    const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
+    if ("item" in prepared) return prepared;
+    if (repo.config.gates.length > 0) {
+      await withGateSlot(
+        repo,
+        id,
+        {
+          onWait: (holders) => {
+            const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(", ");
+            progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === "" ? "" : `: ${busy}`})...`);
+          },
+          onAbort: killActiveShells
+        },
+        () => runGates(repo, prepared.worktree, log, progress)
+      );
     }
-    if (options.report !== void 0 && options.noReport) throw new WgError("Use either --report or --no-report.");
-    if (item.meta.status !== "active") {
-      if (item.meta.kind === "decision" && (item.meta.status === "blocked" || item.meta.status === "todo")) {
-        const next = writeItem(
-          item,
-          withoutKeys(
-            {
-              ...item.meta,
-              status: "done",
-              closed: todayIso(),
-              outcome: options.outcome.trim(),
-              ...options.report === void 0 ? {} : { report: options.report.trim() }
-            },
-            ["needs"]
-          )
-        );
-        const extra = appendReportLine(repo, options.report, id);
-        await commitBookkeeping(repo, [next], `wg: decide #${id} ${item.meta.title}`, id, extra);
-        log.push(`Decision #${id} recorded.`);
-        return { item: next, log };
-      }
-      throw new WgError(`#${id} is ${item.meta.status}. Claim it first with "wg claim ${id}".`);
-    }
-    const branch = item.meta.branch;
-    if (branch === void 0) throw new WgError(`#${id} has no branch.`);
-    if (!await isCleanTracked(repo.mainRoot)) {
-      throw new WgError("The main checkout has uncommitted changes. Commit or stash them, then retry.");
-    }
-    const info = await worktreeOfBranch(repo, branch);
-    if (info === void 0) throw new WgError(`Worktree for #${id} not found.`);
-    const sync = await syncItem(repo, item, "start");
-    if (!sync.ok) {
+    const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
+    if (finished !== "moved") return finished;
+    if (attempt >= DONE_ATTEMPTS) {
       throw new WgError(
-        `Rebase onto ${repo.config.integrationBranch} has conflicts in:
+        `${repo.config.integrationBranch} moved during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`
+      );
+    }
+    log.push(`${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again`);
+    progress(log[log.length - 1] ?? "");
+  }
+}
+async function prepareDone(repo, id, options, log) {
+  await requireIntegration(repo);
+  const item = findItem(loadItems(repo), id);
+  if (item.meta.status !== "active") {
+    if (item.meta.kind === "decision" && (item.meta.status === "blocked" || item.meta.status === "todo")) {
+      const next = writeItem(
+        item,
+        withoutKeys(
+          {
+            ...item.meta,
+            status: "done",
+            closed: todayIso(),
+            outcome: options.outcome.trim(),
+            ...options.report === void 0 ? {} : { report: options.report.trim() }
+          },
+          ["needs"]
+        )
+      );
+      const extra = appendReportLine(repo, options.report, id);
+      await commitBookkeeping(repo, [next], `wg: decide #${id} ${item.meta.title}`, id, extra);
+      log.push(`Decision #${id} recorded.`);
+      return { item: next, log };
+    }
+    throw new WgError(`#${id} is ${item.meta.status}. Claim it first with "wg claim ${id}".`);
+  }
+  const branch = item.meta.branch;
+  if (branch === void 0) throw new WgError(`#${id} has no branch.`);
+  if (!await isCleanTracked(repo.mainRoot)) {
+    throw new WgError("The main checkout has uncommitted changes. Commit or stash them, then retry.");
+  }
+  const info = await worktreeOfBranch(repo, branch);
+  if (info === void 0) throw new WgError(`Worktree for #${id} not found.`);
+  const sync = await syncItem(repo, item, "start");
+  if (!sync.ok) {
+    throw new WgError(
+      `Rebase onto ${repo.config.integrationBranch} has conflicts in:
 ${sync.conflicts.join("\n")}
 Resolve the files, then run "wg sync ${id} --continue" (or "wg sync ${id} --abort"), then "wg done" again.`
-      );
-    }
-    log.push(`rebased ${branch} onto ${repo.config.integrationBranch}`);
-    await runGates(repo, info.path, log);
-    const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
-    if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
-    const reasons = trimmedReasons(options.attestReason ?? {});
-    const problems = checkAttestations(repo, options.attest, files, reasons);
-    if (problems.length > 0) throw new WgError(problems.join("\n"));
-    const unchanged = Object.entries(options.attest).filter(([, value]) => value === "unchanged");
-    const overlaps = await overlapWarnings(repo, items, item, files);
-    log.push(...overlaps);
-    const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
-    const merge2 = await gitOkOutput(repo.mainRoot, ["merge", "--no-ff", "--no-commit", branch]);
-    if (!merge2.ok) {
-      await gitOk(repo.mainRoot, ["merge", "--abort"]);
-      throw new WgError(`Merge into ${repo.config.integrationBranch} failed and was aborted:
+    );
+  }
+  log.push(`rebased ${branch} onto ${repo.config.integrationBranch}`);
+  const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
+  if (files.length === 0) throw new WgError(`${branch} has no changes relative to ${repo.config.integrationBranch}.`);
+  const reasons = trimmedReasons(options.attestReason ?? {});
+  const problems = checkAttestations(repo, options.attest, files, reasons);
+  if (problems.length > 0) throw new WgError(problems.join("\n"));
+  return {
+    branch,
+    worktree: info.path,
+    base: await git(repo.mainRoot, ["rev-parse", repo.config.integrationBranch]),
+    head: await git(repo.mainRoot, ["rev-parse", branch])
+  };
+}
+async function finishDone(repo, id, options, prepared, log) {
+  await requireIntegration(repo);
+  const items = loadItems(repo);
+  const item = findItem(items, id);
+  const { branch } = prepared;
+  if (item.meta.status !== "active" || item.meta.branch !== branch) {
+    throw new WgError(`#${id} changed to ${item.meta.status} while its gates ran. Nothing was merged.`);
+  }
+  const info = await worktreeOfBranch(repo, branch);
+  if (info === void 0) throw new WgError(`Worktree for #${id} disappeared while its gates ran. Nothing was merged.`);
+  if (await git(repo.mainRoot, ["rev-parse", branch]) !== prepared.head) {
+    throw new WgError(`${branch} got new commits while its gates ran. Nothing was merged; run wg done again.`);
+  }
+  if (await git(repo.mainRoot, ["rev-parse", repo.config.integrationBranch]) !== prepared.base) return "moved";
+  if (!await isCleanTracked(repo.mainRoot)) {
+    throw new WgError("The main checkout has uncommitted changes. Commit or stash them, then retry.");
+  }
+  const files = await changedFiles(info.path, repo.config.integrationBranch, branch);
+  const reasons = trimmedReasons(options.attestReason ?? {});
+  const unchanged = Object.entries(options.attest).filter(([, value]) => value === "unchanged");
+  log.push(...await overlapWarnings(repo, items, item, files));
+  const mergeMsg = `Merge ${branch}: ${item.meta.title} (#${id})`;
+  const merge2 = await gitOkOutput(repo.mainRoot, ["merge", "--no-ff", "--no-commit", branch]);
+  if (!merge2.ok) {
+    await gitOk(repo.mainRoot, ["merge", "--abort"]);
+    throw new WgError(`Merge into ${repo.config.integrationBranch} failed and was aborted:
 ${merge2.output}`);
-    }
-    try {
-      const merged = findItem(loadItems(repo), id);
-      const closedMeta = withoutKeys(
-        {
-          ...merged.meta,
-          status: "done",
-          closed: todayIso(),
-          outcome: options.outcome.trim(),
-          ...options.report === void 0 ? {} : { report: options.report.trim() },
-          ...Object.keys(options.attest).length === 0 ? {} : { attest: options.attest },
-          ...Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }
-        },
-        ["wt", "branch", "needs"]
-      );
-      const next = writeItem(merged, closedMeta);
-      const all = loadItems(repo);
-      const indexRel = writeIndex(repo, all);
-      const paths = [relative3(repo.mainRoot, next.file), indexRel];
-      paths.push(...appendReportLine(repo, options.report, id));
-      await git(repo.mainRoot, ["add", "--all", "--", ...paths]);
-      const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ""}`);
-      const body = [...attestLines, `Todo: #${id}`].join("\n");
-      await git(repo.mainRoot, ["commit", "--no-verify", "-m", `${mergeMsg}
+  }
+  try {
+    const closedMeta = withoutKeys(
+      {
+        ...item.meta,
+        status: "done",
+        closed: todayIso(),
+        outcome: options.outcome.trim(),
+        ...options.report === void 0 ? {} : { report: options.report.trim() },
+        ...Object.keys(options.attest).length === 0 ? {} : { attest: options.attest },
+        ...Object.keys(reasons).length === 0 ? {} : { attestReason: reasons }
+      },
+      ["wt", "branch", "needs"]
+    );
+    const next = writeItem(findItem(loadItems(repo), id), closedMeta);
+    const indexRel = writeIndex(repo, loadItems(repo));
+    const paths = [relative3(repo.mainRoot, next.file), indexRel];
+    paths.push(...appendReportLine(repo, options.report, id));
+    await git(repo.mainRoot, ["add", "--all", "--", ...paths]);
+    const attestLines = unchanged.map(([name]) => `Attest ${name}: unchanged - ${reasons[name] ?? ""}`);
+    const body = [...attestLines, `Todo: #${id}`].join("\n");
+    await git(repo.mainRoot, ["commit", "--no-verify", "-m", `${mergeMsg}
 
 ${body}`]);
-      log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
-      await git(repo.mainRoot, ["worktree", "remove", "--force", info.path]);
-      await git(repo.mainRoot, ["branch", "-d", branch]);
-      clearLease(repo, id);
-      log.push("removed worktree and branch");
-      log.push(`The worktree is gone; continue from ${repo.mainRoot}.`);
-      return { item: next, log };
-    } catch (error62) {
-      await gitOk(repo.mainRoot, ["merge", "--abort"]);
-      throw error62;
-    }
-  });
+    log.push(`merged ${branch} into ${repo.config.integrationBranch}`);
+    await git(repo.mainRoot, ["worktree", "remove", "--force", info.path]);
+    await git(repo.mainRoot, ["branch", "-d", branch]);
+    clearLease(repo, id);
+    log.push("removed worktree and branch");
+    log.push(`The worktree is gone; continue from ${repo.mainRoot}.`);
+    return { item: next, log };
+  } catch (error62) {
+    await gitOk(repo.mainRoot, ["merge", "--abort"]);
+    throw error62;
+  }
 }
 async function gitOkOutput(cwd, args) {
   const result = await run("git", args, cwd);
@@ -34560,7 +34731,8 @@ program2.command("done").description("Rebase, run gates, merge into the integrat
     noReport: opts.report === false,
     attest: opts.attest,
     attestReason: opts.attestReason
-  });
+  }, (line2) => process.stderr.write(`${line2}
+`));
   for (const line2 of result.log) print(line2);
   print(`Done #${itemId2}.`);
 });
