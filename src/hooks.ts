@@ -1,9 +1,10 @@
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { endBypass, startBypass } from './bypass.js';
 import { currentItemText, digestText, rulesText } from './context.js';
-import { mutatingGit, touchesProtectedState, writesProtectedPaths } from './guard.js';
+import { mutatingGit, shellWriteTargets, touchesProtectedState, writesProtectedPaths } from './guard.js';
 import { loadAll } from './items.js';
 import { itemForToplevel } from './ops.js';
 import { tryResolveRepo } from './repo.js';
@@ -103,7 +104,7 @@ async function gateBash(input: HookInput): Promise<HookOutput | undefined> {
   }
   if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
   const mutating = mutatingGit(command);
-  if (mutating.length === 0) return undefined;
+  if (mutating.length === 0) return warnUnclaimedWrites(input, command);
   if (bypassActive(repo, input.session_id)) {
     const push = mutating.find((m) => m.subcommand === 'push');
     if (push === undefined) return undefined;
@@ -112,6 +113,33 @@ async function gateBash(input: HookInput): Promise<HookOutput | undefined> {
   const names = [...new Set(mutating.map((m) => `git ${m.subcommand}`.trim()))].join(', ');
   return deny(
     `Workgate: ${names} is not allowed here. Use wg checkpoint / wg done / wg claim instead; read-only git commands are fine.`,
+  );
+}
+
+/**
+ * Shell writes are not denied like Edit/Write: static analysis of shell is too imprecise for a hard
+ * gate. A warning still catches the common case of an agent falling back to the shell after a deny.
+ */
+async function warnUnclaimedWrites(input: HookInput, command: string): Promise<HookOutput | undefined> {
+  const cwd = input.cwd ?? process.cwd();
+  const uncovered: string[] = [];
+  const coveredByDir = new Map<string, boolean>();
+  for (const target of shellWriteTargets(command)) {
+    const abs = resolve(cwd, target === '~' || target.startsWith('~/') ? homedir() + target.slice(1) : target);
+    const dir = nearestExistingDir(abs);
+    let covered = coveredByDir.get(dir);
+    if (covered === undefined) {
+      const repo = await tryResolveRepo(dir);
+      covered = repo === undefined || bypassActive(repo, input.session_id) || (await itemForToplevel(repo, repo.toplevel)) !== undefined;
+      coveredByDir.set(dir, covered);
+    }
+    if (!covered) uncovered.push(target);
+  }
+  if (uncovered.length === 0) return undefined;
+  const shown = uncovered.slice(0, 3).join(', ') + (uncovered.length > 3 ? ', ...' : '');
+  return context(
+    'PreToolUse',
+    `Workgate: this command writes ${shown}, which no active item covers. Shell writes are not blocked, but they skip the item flow exactly like a denied Edit would. If this is part of a change, run wg add and wg claim and work inside the printed worktree; keep scratch files outside the repository.`,
   );
 }
 

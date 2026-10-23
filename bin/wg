@@ -32865,6 +32865,7 @@ async function readStdin() {
 
 // src/hooks.ts
 import { existsSync as existsSync5 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname as dirname4, relative as relative4, resolve as resolve2 } from "node:path";
 
 // src/context.ts
@@ -32946,6 +32947,9 @@ var WRAPPERS = /* @__PURE__ */ new Set(["sudo", "command", "env", "time", "nohup
 var SHELLS = /* @__PURE__ */ new Set(["sh", "bash", "zsh", "dash", "ksh"]);
 var OPTIONS_WITH_ARG = /* @__PURE__ */ new Set(["-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--super-prefix"]);
 function splitCommands(input2, depth = 0) {
+  return splitWords(input2, depth).map((words) => words.map((w) => w.text));
+}
+function splitWords(input2, depth) {
   const commands = [];
   if (depth > 4) return commands;
   let words = [];
@@ -32960,11 +32964,11 @@ function splitCommands(input2, depth = 0) {
   };
   const flushCommand = () => {
     flushWord();
-    if (words.length > 0) commands.push(words.map((w) => w.text));
+    if (words.length > 0) commands.push(words);
     words = [];
   };
   const nested = (code) => {
-    for (const cmd of splitCommands(code, depth + 1)) commands.push(cmd);
+    for (const cmd of splitWords(code, depth + 1)) commands.push(cmd);
   };
   let i = 0;
   while (i < input2.length) {
@@ -33201,6 +33205,106 @@ function writesProtectedPaths(command, paths) {
     if (FILE_WRITERS.has(name) || INTERPRETERS.test(name)) return true;
     return IN_PLACE_EDITORS.has(name) && words.some((w) => /^-[a-zA-Z]*i/.test(w) || w === "--in-place");
   });
+}
+var HEREDOC = /<<(-?)\s*(['"]?)([A-Za-z_][A-Za-z0-9_]*)\2/g;
+function stripHeredocs(input2) {
+  const kept = [];
+  const pending = [];
+  for (const line2 of input2.split("\n")) {
+    if (pending.length > 0) {
+      if (line2.trim() === pending[0]) pending.shift();
+      continue;
+    }
+    kept.push(line2);
+    for (const m of line2.matchAll(HEREDOC)) {
+      if (line2[m.index + 2] === "<" || line2[m.index - 1] === "<") continue;
+      pending.push(m[3] ?? "");
+    }
+  }
+  return kept.join("\n");
+}
+var REDIRECT = /^\d*(>>?|>\|)(.*)$/;
+var COPIERS = /* @__PURE__ */ new Set(["cp", "mv", "install", "ln", "rsync"]);
+var REMOVERS = /* @__PURE__ */ new Set(["rm", "rmdir", "truncate", "touch", "mkdir"]);
+var SCRIPT_EDITORS = /* @__PURE__ */ new Set(["sed", "perl", "ruby"]);
+var OPTION_ARGS = {
+  truncate: /* @__PURE__ */ new Set(["-s", "-r", "--size", "--reference"]),
+  touch: /* @__PURE__ */ new Set(["-r", "-t", "-d", "--reference", "--date"]),
+  mkdir: /* @__PURE__ */ new Set(["-m", "--mode"]),
+  install: /* @__PURE__ */ new Set(["-m", "-o", "-g", "--mode", "--owner", "--group"]),
+  sed: /* @__PURE__ */ new Set(["-e", "-f"]),
+  perl: /* @__PURE__ */ new Set(["-e", "-E"]),
+  ruby: /* @__PURE__ */ new Set(["-e"])
+};
+var NO_OPTION_ARGS = /* @__PURE__ */ new Set();
+function positionals(name, words) {
+  const withArg = OPTION_ARGS[name] ?? NO_OPTION_ARGS;
+  const out = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i] ?? "";
+    if (withArg.has(w)) i += 1;
+    else if (!w.startsWith("-")) out.push(w);
+  }
+  return out;
+}
+function editorTargets(name, words) {
+  const inPlace = words.findIndex((w) => /^-[a-zA-Z]*i/.test(w) || w.startsWith("--in-place"));
+  if (inPlace === -1) return [];
+  const rest = [...words];
+  const next = rest[inPlace + 1];
+  if (rest[inPlace] === "-i" && next !== void 0 && (next === "" || next.startsWith("."))) rest.splice(inPlace + 1, 1);
+  const files = positionals(name, rest);
+  const hasScriptOption = rest.some((w) => w === "-e" || w === "-f" || /^-[a-zA-Z]*e$/.test(w));
+  return hasScriptOption ? files : files.slice(1);
+}
+function commandTargets(words, depth) {
+  const targets = [];
+  const plain = [];
+  for (let i = 0; i < words.length; i += 1) {
+    const w = words[i];
+    if (w === void 0) continue;
+    const m = w.quoted ? null : REDIRECT.exec(w.text);
+    if (m === null) {
+      plain.push(w.text);
+      continue;
+    }
+    const inline = m[2] ?? "";
+    if (inline !== "") targets.push(inline);
+    else if (words[i + 1] !== void 0) {
+      targets.push(words[i + 1]?.text ?? "");
+      i += 1;
+    }
+  }
+  let rest = plain;
+  while (rest.length > 0 && (WRAPPERS.has(basename0(rest)) || isAssignment(rest[0] ?? ""))) rest = rest.slice(1);
+  const name = basename0(rest);
+  const args = rest.slice(1);
+  if (SHELLS.has(name)) {
+    const idx = args.findIndex((w) => /^-[a-z]*c$/.test(w));
+    const script = idx === -1 ? void 0 : args[idx + 1];
+    if (script !== void 0) targets.push(...collectTargets(script, depth + 1));
+  } else if (name === "eval") {
+    targets.push(...collectTargets(args.join(" "), depth + 1));
+  } else if (name === "tee" || REMOVERS.has(name)) {
+    targets.push(...positionals(name, args));
+  } else if (COPIERS.has(name)) {
+    const files = positionals(name, args);
+    if (files.length >= 2) targets.push(files[files.length - 1] ?? "");
+  } else if (SCRIPT_EDITORS.has(name)) {
+    targets.push(...editorTargets(name, args));
+  } else if (name === "dd") {
+    for (const a of args) if (a.startsWith("of=")) targets.push(a.slice(3));
+  }
+  return targets;
+}
+function collectTargets(command, depth) {
+  if (depth > 4) return [];
+  return splitWords(stripHeredocs(command), depth).flatMap((words) => commandTargets(words, depth));
+}
+function shellWriteTargets(command) {
+  return collectTargets(command, 0).filter(
+    (t) => t !== "" && !t.includes("$") && !t.includes("`") && !t.startsWith("/dev/")
+  );
 }
 
 // src/ops.ts
@@ -33895,7 +33999,7 @@ async function gateBash(input2) {
   }
   if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
   const mutating = mutatingGit(command);
-  if (mutating.length === 0) return void 0;
+  if (mutating.length === 0) return warnUnclaimedWrites(input2, command);
   if (bypassActive(repo, input2.session_id)) {
     const push = mutating.find((m) => m.subcommand === "push");
     if (push === void 0) return void 0;
@@ -33904,6 +34008,28 @@ async function gateBash(input2) {
   const names = [...new Set(mutating.map((m) => `git ${m.subcommand}`.trim()))].join(", ");
   return deny(
     `Workgate: ${names} is not allowed here. Use wg checkpoint / wg done / wg claim instead; read-only git commands are fine.`
+  );
+}
+async function warnUnclaimedWrites(input2, command) {
+  const cwd = input2.cwd ?? process.cwd();
+  const uncovered = [];
+  const coveredByDir = /* @__PURE__ */ new Map();
+  for (const target of shellWriteTargets(command)) {
+    const abs = resolve2(cwd, target === "~" || target.startsWith("~/") ? homedir() + target.slice(1) : target);
+    const dir = nearestExistingDir(abs);
+    let covered = coveredByDir.get(dir);
+    if (covered === void 0) {
+      const repo = await tryResolveRepo(dir);
+      covered = repo === void 0 || bypassActive(repo, input2.session_id) || await itemForToplevel(repo, repo.toplevel) !== void 0;
+      coveredByDir.set(dir, covered);
+    }
+    if (!covered) uncovered.push(target);
+  }
+  if (uncovered.length === 0) return void 0;
+  const shown = uncovered.slice(0, 3).join(", ") + (uncovered.length > 3 ? ", ..." : "");
+  return context(
+    "PreToolUse",
+    `Workgate: this command writes ${shown}, which no active item covers. Shell writes are not blocked, but they skip the item flow exactly like a denied Edit would. If this is part of a change, run wg add and wg claim and work inside the printed worktree; keep scratch files outside the repository.`
   );
 }
 async function itemFor(repo) {
@@ -34154,12 +34280,12 @@ async function renderStatusline(rawInput, nowSeconds = Math.floor(Date.now() / 1
 
 // src/statusline-install.ts
 import { chmodSync, copyFileSync, existsSync as existsSync7, mkdirSync as mkdirSync6, readFileSync as readFileSync6, realpathSync, writeFileSync as writeFileSync6 } from "node:fs";
-import { homedir } from "node:os";
+import { homedir as homedir2 } from "node:os";
 import { dirname as dirname5, join as join7 } from "node:path";
 var SettingsSchema = external_exports.record(external_exports.string(), external_exports.unknown());
 var ExistingSchema = external_exports.object({ command: external_exports.string().optional() }).loose();
 function installStatusline(scriptPath, options) {
-  const home = options.homeDir ?? homedir();
+  const home = options.homeDir ?? homedir2();
   const settingsFile = options.settingsFile ?? join7(home, ".claude", "settings.json");
   const targetDir = join7(home, ".claude", "workgate");
   const target = join7(targetDir, "wg");

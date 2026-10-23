@@ -125,6 +125,30 @@ describe('pre-tool-use: item files are read-only for the agent', () => {
   });
 });
 
+describe('pre-tool-use: shell writes without an item', () => {
+  it('allows but warns on shell writes in the main checkout without an active item', () => {
+    for (const cmd of ['echo hi > y.txt', "sed -i '' s/a/b/ README.md", 'tee out.txt', 'rm README.md']) {
+      const r = bash(cmd);
+      expect(r.decision).toBeUndefined();
+      expect(r.context).toContain('wg claim');
+    }
+  });
+
+  it('stays quiet for reads, discarded output, paths outside the repo and inside an item worktree', () => {
+    expect(bash('cat README.md > /dev/null 2>&1').raw).toBe('');
+    expect(bash(`echo hi > ${join(repo.root, 'outside.txt')}`).raw).toBe('');
+    repo.wgOk(['add', 'Work', '--kind', 'feature']);
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    expect(bash('echo hi > y.txt', wt).raw).toBe('');
+    expect(bash(`echo hi > ${join(repo.dir, 'y.txt')}`, wt).context).toContain('wg claim');
+  });
+
+  it('stays quiet during a bypass', () => {
+    hook('user-prompt-submit', { prompt: '[quick] tiny fix' });
+    expect(bash('echo hi > y.txt').raw).toBe('');
+  });
+});
+
 describe('bypass via [quick] prompt', () => {
   it('opens the gate for one prompt, allows commits but not push, then records an item', () => {
     const start = hook('user-prompt-submit', { prompt: '[quick] fix the typo' });

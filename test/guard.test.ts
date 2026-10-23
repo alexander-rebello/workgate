@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mutatingGit, touchesProtectedState } from '../src/guard.js';
+import { mutatingGit, shellWriteTargets, touchesProtectedState } from '../src/guard.js';
 
 const denied = (cmd: string): string[] => mutatingGit(cmd).map((m) => m.subcommand);
 
@@ -81,5 +81,43 @@ describe('touchesProtectedState', () => {
     expect(touchesProtectedState('cat .git/workgate/bypass.json')).toBe(true);
     expect(touchesProtectedState('wg bypass status')).toBe(false);
     expect(touchesProtectedState('wg list')).toBe(false);
+  });
+});
+
+describe('shellWriteTargets', () => {
+  it.each([
+    ['echo hi > y.txt', ['y.txt']],
+    ['echo hi >y.txt', ['y.txt']],
+    ['echo hi >> log/a.txt', ['log/a.txt']],
+    ['cmd 2> err.txt', ['err.txt']],
+    ['cmd &> all.txt', ['all.txt']],
+    ['cat > notes.md <<EOF\nhello\nEOF', ['notes.md']],
+    ['printf x | tee -a a.txt b.txt', ['a.txt', 'b.txt']],
+    ["sed -i '' 's/a/b/' src/x.ts", ['src/x.ts']],
+    ['sed -i.bak -e s/a/b/ src/x.ts src/y.ts', ['src/x.ts', 'src/y.ts']],
+    ['perl -pi -e s/a/b/ f.txt', ['f.txt']],
+    ['cp -r src/a dest', ['dest']],
+    ['mv a.txt b.txt', ['b.txt']],
+    ['rm -f a.txt b.txt', ['a.txt', 'b.txt']],
+    ['touch new.txt && mkdir -p d/e', ['new.txt', 'd/e']],
+    ['dd if=/dev/zero of=blob bs=1 count=1', ['blob']],
+    ['bash -c "echo x > inner.txt"', ['inner.txt']],
+    ['wg add t --kind bug <<<body\nrm a.txt', ['a.txt']],
+  ])('finds the targets of %s', (cmd, expected) => {
+    expect(shellWriteTargets(cmd)).toEqual(expected);
+  });
+
+  it.each([
+    'ls -la',
+    'cat a.txt',
+    'grep ">" a.txt',
+    'echo "a > b"',
+    'cmd > /dev/null 2>&1',
+    'cmd >&2',
+    'sed s/a/b/ a.txt',
+    'wg add "t" --kind bug <<\'EOF\'\nfoo > bar.txt\nrm x\nEOF',
+    'echo $HOME > $OUT',
+  ])('finds nothing in %s', (cmd) => {
+    expect(shellWriteTargets(cmd)).toEqual([]);
   });
 });
