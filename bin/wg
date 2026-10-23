@@ -32876,6 +32876,7 @@ function rulesText(repo) {
     "Workgate is active in this repository. Work items are files in " + c.todosDir + "/; the index " + c.indexFile + " is generated.",
     "- Anything that changes files must belong to an item. Read-only questions need none.",
     `- No item yet? Run: wg add "<title>" --kind bug|feature|rework|decision   then: wg claim <id>. Claim prints a worktree path; edit files only inside it.`,
+    `- Pass the item body on stdin with a quoted heredoc: wg add "<title>" --kind <kind> <<'EOF' ... EOF. Asked only to record work? Run wg add and stop; claim only when told to start. Rewrite an unclaimed item's body with: wg body <id> --set (stdin).`,
     "- Keep the plan as a checklist in the item body: write it with wg body --set (reads stdin), tick steps with wg plan check <n...> (wg plan lists them numbered). Item files and the index are read-only for you.",
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,
@@ -33487,7 +33488,9 @@ async function itemForToplevel(repo, toplevel) {
   return items.find((i) => i.meta.status === "active" && i.meta.branch === info.branch);
 }
 async function worktreeItem(repo, cwd) {
-  const item = await requireItemForCwd(repo, cwd);
+  return worktreeCopy(repo, await requireItemForCwd(repo, cwd));
+}
+async function worktreeCopy(repo, item) {
   const info = await worktreeOfBranch(repo, item.meta.branch ?? "");
   if (info === void 0) throw new WgError(`Worktree for #${item.meta.id} not found.`);
   const file2 = join5(info.path, repo.config.todosDir, basename2(item.file));
@@ -33510,6 +33513,25 @@ async function setBody(repo, cwd, body) {
   const item = await worktreeItem(repo, cwd);
   writeItem(item, item.meta, body);
   touchLease(repo, item.meta.id);
+}
+async function readBodyById(repo, id) {
+  const item = findItem(loadItems(repo), id);
+  return item.meta.branch === void 0 ? item.body : (await worktreeCopy(repo, item)).body;
+}
+async function setBodyById(repo, id, body) {
+  return withLock(repo, async () => {
+    await requireIntegration(repo);
+    const item = findItem(loadItems(repo), id);
+    if (item.meta.status === "done" || item.meta.status === "dropped") {
+      throw new WgError(`#${id} is ${item.meta.status}; closed items cannot be edited.`);
+    }
+    if (item.meta.branch !== void 0) {
+      throw new WgError(`#${id} has been claimed; edit its body from its worktree with "wg body --set".`);
+    }
+    const next = writeItem(item, item.meta, body);
+    await commitBookkeeping(repo, [next], `wg: body #${id} ${item.meta.title}`, id);
+    return next;
+  });
 }
 async function markSteps(repo, cwd, numbers, checked) {
   const item = await worktreeItem(repo, cwd);
@@ -34232,7 +34254,7 @@ program2.command("init").description("Set up workgate in the current repository"
   const log = await initRepo(process.cwd(), { branch: opts.branch, claudeMd: opts.claudeMd === true, commit: opts.commit });
   for (const line2 of log) print(line2);
 });
-program2.command("add").description("Create a work item").argument("<title>").addOption(new Option("--kind <kind>", "bug | feature | rework | decision").choices(KINDS).makeOptionMandatory()).addOption(new Option("--sev <sev>", "severity for bugs").choices(SEVERITIES)).option("--body <text>", "item body (default: a template for the kind)").option("--after <ids>", "comma-separated ids this item depends on", parseIds).option("--parent <id>", "parent item id", parseId).option("--needs <text>", "create the item blocked, stating what the owner must provide").option("--json", "machine-readable output").action(
+program2.command("add").description("Create a work item").argument("<title>").addOption(new Option("--kind <kind>", "bug | feature | rework | decision").choices(KINDS).makeOptionMandatory()).addOption(new Option("--sev <sev>", "severity for bugs").choices(SEVERITIES)).option("--body <text>", "item body; otherwise read from stdin (default: a template for the kind)").option("--after <ids>", "comma-separated ids this item depends on", parseIds).option("--parent <id>", "parent item id", parseId).option("--needs <text>", "create the item blocked, stating what the owner must provide").option("--json", "machine-readable output").action(
   async (title, opts) => {
     const repo = await repoForCwd();
     const body = opts.body ?? (process.stdin.isTTY ? void 0 : await readStdin());
@@ -34355,15 +34377,16 @@ program2.command("report").description("Plain-language report lines of items clo
 program2.command("checkpoint").description("Commit pending changes in the current item's worktree").argument("[message]").action(async (message) => {
   print(await checkpoint(await repoForCwd(), process.cwd(), message));
 });
-program2.command("body").description("Print the current item's body, or replace it from stdin with --set").option("--set", "replace the body with stdin").action(async (opts) => {
+program2.command("body").description("Print an item's body, or replace it from stdin with --set (default: the current worktree's item)").argument("[id]", "item id; --set with an id only works for items that were never claimed", parseId).option("--set", "replace the body with stdin").action(async (id, opts) => {
   const repo = await repoForCwd();
   if (opts.set === true) {
     const text = await readStdin();
     if (text.trim() === "") throw new WgError("Refusing to set an empty body; pipe the new body on stdin.");
-    await setBody(repo, process.cwd(), text);
+    if (id === void 0) await setBody(repo, process.cwd(), text);
+    else await setBodyById(repo, id, text);
     print("Body updated.");
   } else {
-    print(await readBody(repo, process.cwd()));
+    print(id === void 0 ? await readBody(repo, process.cwd()) : await readBodyById(repo, id));
   }
 });
 var plan = program2.command("plan").description("Show or tick the current item's plan checklist").action(async () => {

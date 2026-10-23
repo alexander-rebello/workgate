@@ -51,6 +51,8 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 | `wg list`, `wg find <text>`, `wg show <id>`, `wg next`, `wg stats` | views; most take `--json` |
 | `wg claim <id>` | status `active`, create branch and worktree, print the path |
 | `wg resume <id>`, `wg release <id>` | re-attach after an interruption, or give an item back |
+| `wg body [id] [--set]` | print or replace (stdin) a body: the current worktree's item, or by id an item that was never claimed |
+| `wg plan`, `wg plan check\|uncheck <n...>` | list or tick the plan checklist of the current worktree's item |
 | `wg checkpoint [message]` | commit pending changes in the current item worktree |
 | `wg sync [id] [--continue\|--abort]` | rebase onto the integration branch, resolve conflicts |
 | `wg done [id] --outcome t (--report t \| --no-report) [--attest name=ok\|n/a\|unchanged [--attest-reason name=t]]` | rebase, gates, attestations, merge, close, clean up |

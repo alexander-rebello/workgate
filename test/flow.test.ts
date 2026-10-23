@@ -368,3 +368,58 @@ describe('plan and body editing', () => {
     expect(repo.read('docs/todos/0001-planned.md')).toContain('status: done');
   });
 });
+
+describe('body by id', () => {
+  it('replaces the body of a todo item with a bookkeeping commit', () => {
+    add('Later');
+    expect(repo.wg(['body', '1', '--set'], repo.dir, 'New body.\n\n- [ ] step').code).toBe(0);
+    const file = repo.read('docs/todos/0001-later.md');
+    expect(file).toContain('- [ ] step');
+    expect(file).toContain('status: todo');
+    expect(repo.git(['log', '--format=%s', '-1'])).toBe('wg: body #1 Later');
+    expect(repo.git(['status', '--porcelain'])).toBe('');
+    expect(repo.wgOk(['body', '1'])).toContain('New body.');
+  });
+
+  it('works from inside another item worktree', () => {
+    add('Current');
+    add('Other');
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    expect(repo.wg(['body', '2', '--set'], wt, 'Edited from a worktree.').code).toBe(0);
+    expect(repo.read('docs/todos/0002-other.md')).toContain('Edited from a worktree.');
+  });
+
+  it('replaces the body of a blocked item that was never claimed', () => {
+    add('Pick one', ['--kind', 'decision', '--needs', 'A or B?']);
+    expect(repo.wg(['body', '1', '--set'], repo.dir, 'Options: A, B.').code).toBe(0);
+    const file = repo.read('docs/todos/0001-pick-one.md');
+    expect(file).toContain('Options: A, B.');
+    expect(file).toContain('status: blocked');
+  });
+
+  it('refuses items whose body lives on a branch, closed items and an empty body', () => {
+    add('Claimed');
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    const active = repo.wg(['body', '1', '--set'], repo.dir, 'x');
+    expect(active.code).not.toBe(0);
+    expect(active.err).toContain('worktree');
+
+    repo.wgOk(['block', '1', '--needs', 'access']);
+    expect(repo.wg(['body', '1', '--set'], repo.dir, 'x').code).not.toBe(0);
+
+    add('Gone');
+    repo.wgOk(['drop', '2', '--reason', 'obsolete']);
+    expect(repo.wg(['body', '2', '--set'], repo.dir, 'x').code).not.toBe(0);
+
+    add('Empty');
+    expect(repo.wg(['body', '3', '--set'], repo.dir, '  \n').code).not.toBe(0);
+    expect(existsSync(wt)).toBe(true);
+  });
+
+  it('reads the worktree copy of an active item', () => {
+    add('Claimed');
+    const wt = worktreeFrom(repo.wgOk(['claim', '1']));
+    expect(repo.wg(['body', '--set'], wt, 'Worktree plan.').code).toBe(0);
+    expect(repo.wgOk(['body', '1'])).toContain('Worktree plan.');
+  });
+});

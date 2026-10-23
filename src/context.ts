@@ -11,6 +11,7 @@ export function rulesText(repo: Repo): string {
     'Workgate is active in this repository. Work items are files in ' + c.todosDir + '/; the index ' + c.indexFile + ' is generated.',
     '- Anything that changes files must belong to an item. Read-only questions need none.',
     `- No item yet? Run: wg add "<title>" --kind bug|feature|rework|decision   then: wg claim <id>. Claim prints a worktree path; edit files only inside it.`,
+    `- Pass the item body on stdin with a quoted heredoc: wg add "<title>" --kind <kind> <<'EOF' ... EOF. Asked only to record work? Run wg add and stop; claim only when told to start. Rewrite an unclaimed item's body with: wg body <id> --set (stdin).`,
     '- Keep the plan as a checklist in the item body: write it with wg body --set (reads stdin), tick steps with wg plan check <n...> (wg plan lists them numbered). Item files and the index are read-only for you.',
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,

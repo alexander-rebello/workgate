@@ -294,7 +294,10 @@ export async function itemForToplevel(repo: Repo, toplevel: string): Promise<Ite
 }
 
 async function worktreeItem(repo: Repo, cwd: string): Promise<Item> {
-  const item = await requireItemForCwd(repo, cwd);
+  return worktreeCopy(repo, await requireItemForCwd(repo, cwd));
+}
+
+async function worktreeCopy(repo: Repo, item: Item): Promise<Item> {
   const info = await worktreeOfBranch(repo, item.meta.branch ?? '');
   if (info === undefined) throw new WgError(`Worktree for #${item.meta.id} not found.`);
   const file = join(info.path, repo.config.todosDir, basename(item.file));
@@ -328,6 +331,32 @@ export async function setBody(repo: Repo, cwd: string, body: string): Promise<vo
   const item = await worktreeItem(repo, cwd);
   writeItem(item, item.meta, body);
   touchLease(repo, item.meta.id);
+}
+
+/** An item that has been claimed keeps its body on its branch; that copy wins until done merges it back. */
+export async function readBodyById(repo: Repo, id: number): Promise<string> {
+  const item = findItem(loadItems(repo), id);
+  return item.meta.branch === undefined ? item.body : (await worktreeCopy(repo, item)).body;
+}
+
+/**
+ * Only unclaimed items are edited on the integration branch: once an item has a branch, a second
+ * copy changed here would conflict with the worktree copy when done rebases.
+ */
+export async function setBodyById(repo: Repo, id: number, body: string): Promise<Item> {
+  return withLock(repo, async () => {
+    await requireIntegration(repo);
+    const item = findItem(loadItems(repo), id);
+    if (item.meta.status === 'done' || item.meta.status === 'dropped') {
+      throw new WgError(`#${id} is ${item.meta.status}; closed items cannot be edited.`);
+    }
+    if (item.meta.branch !== undefined) {
+      throw new WgError(`#${id} has been claimed; edit its body from its worktree with "wg body --set".`);
+    }
+    const next = writeItem(item, item.meta, body);
+    await commitBookkeeping(repo, [next], `wg: body #${id} ${item.meta.title}`, id);
+    return next;
+  });
 }
 
 export async function markSteps(
