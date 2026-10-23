@@ -33349,7 +33349,9 @@ async function claimItem(repo, id) {
       throw new WgError(`#${id} waits on ${pending.map((p) => `#${p}`).join(", ")}.`);
     }
     if (item.meta.kind === "decision") {
-      throw new WgError('Decision items are answered, not claimed. Use "wg done" with an outcome.');
+      throw new WgError(
+        `Decision items are answered, not claimed. Use: wg done ${id} --outcome "<answer>" (--report "<sentence>" | --no-report).`
+      );
     }
     const branch = `${id}-${slugify2(item.meta.title)}`;
     const path2 = worktreePathFor(repo, branch);
@@ -34249,7 +34251,7 @@ async function resolveItemId(repo, id) {
   return item.meta.id;
 }
 var program2 = new Command();
-program2.name("wg").description("File-backed work items that gate changes behind claimed items, worktrees and a verified merge flow.").showHelpAfterError();
+program2.name("wg").version("0.1.5").description("File-backed work items that gate changes behind claimed items, worktrees and a verified merge flow.").showHelpAfterError();
 program2.command("init").description("Set up workgate in the current repository").option("--branch <name>", "integration branch (default: current branch)").option("--claude-md", "add a short workgate section to CLAUDE.md").option("--no-commit", "write files without committing").action(async (opts) => {
   const log = await initRepo(process.cwd(), { branch: opts.branch, claudeMd: opts.claudeMd === true, commit: opts.commit });
   for (const line2 of log) print(line2);

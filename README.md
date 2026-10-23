@@ -41,7 +41,7 @@ This writes `.workgate/config.json` (integration branch, detected `lint`/`build`
 
 Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Items may declare `after: [ids]` and `parent: id`. Fields are validated on every read; `wg doctor` reports problems.
 
-`blocked` is how the owner is asked for something. Decision items start blocked and are answered with `wg done <id> --outcome "..."`.
+`blocked` is how the owner is asked for something. Decision items start blocked and are answered with `wg done <id> --outcome "..." (--report "..." | --no-report)`; they are never claimed.
 
 ## Commands
 

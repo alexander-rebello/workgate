@@ -244,6 +244,15 @@ describe('done', () => {
     expect(repo.wgOk(['show', '1'])).toContain('[done]');
   });
 
+  it('points a claimed decision at the complete done command', () => {
+    repo.wgOk(['add', 'Which db?', '--kind', 'decision', '--needs', 'pick a db']);
+    repo.wgOk(['unblock', '1']);
+    const r = repo.wg(['claim', '1']);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('wg done 1 --outcome');
+    expect(r.err).toContain('--no-report');
+  });
+
   it('rejects done for unclaimed non-decision items', () => {
     const id = add('Not claimed');
     expect(repo.wg(['done', String(id), '--outcome', 'o', '--no-report']).err).toContain('Claim it first');
