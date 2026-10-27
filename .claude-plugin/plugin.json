@@ -1,6 +1,6 @@
 {
   "name": "workgate",
-  "version": "0.1.6",
+  "version": "0.2.0",
   "description": "Gate every change behind a claimed work item: file-backed items, per-item worktrees, a verified merge flow, and hooks that keep sessions on the rails.",
   "author": {
     "name": "Alexander Rebello"
