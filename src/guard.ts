@@ -294,6 +294,26 @@ export function mutatingGit(command: string): GitInvocation[] {
   return findGitInvocations(command).filter((inv) => !isReadOnlyGit(inv));
 }
 
+const REDIRECTION = /^\d*(<|>|&>)/;
+
+/**
+ * Finds simple commands that run a configured gate command as is (trailing redirections allowed).
+ * Extra arguments mean a targeted run, which stays allowed.
+ */
+export function runsGateCommand(command: string, gateCommands: readonly string[]): string | undefined {
+  const runs = splitCommands(command);
+  for (const gate of gateCommands) {
+    for (const gateWords of splitCommands(gate)) {
+      if (gateWords.length === 0) continue;
+      const hit = runs.some(
+        (words) => gateWords.every((w, i) => words[i] === w) && words.slice(gateWords.length).every((w) => REDIRECTION.test(w)),
+      );
+      if (hit) return gate;
+    }
+  }
+  return undefined;
+}
+
 const PROTECTED_STATE = /\.git\/workgate|\bbypass\.json\b/;
 
 /** True if the command touches workgate's local state or manages bypass, which only the owner may do. */

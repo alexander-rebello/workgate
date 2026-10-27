@@ -19,7 +19,7 @@ You complete exactly one workgate item, unattended. Nobody reads your messages w
 
 - Stay inside the item's scope. Problems you notice that are not part of it become new items: `wg add "<title>" --kind <kind>` with a short body on stdin. Do not claim or fix them.
 - Tick steps with `cd "W" && wg plan check <n>` and save progress with `cd "W" && wg checkpoint "<message>"` after each meaningful step.
-- Do not run the configured gate commands (full lint, build, type check or test suite) yourself. `wg done` runs them, a limited number at a time across all workers (`gateConcurrency`), and prints what failed; other workers are building at the same time and parallel full builds exhaust the machine. While working, run only targeted checks, such as the tests for the files you changed.
+- Do not run the configured gate commands (full lint, build, type check or test suite) yourself. `wg done` runs them, a limited number at a time across all workers (`gateConcurrency`), and prints what failed; other workers are building at the same time and parallel full builds exhaust the machine. While working, run only targeted checks, such as the tests for the files you changed. To run all gates before finishing, use `wg check <id>` (longest Bash timeout; it queues like `wg done`).
 - Item files, the index and mutating git are off limits; use the `wg` commands.
 
 ## Finish

@@ -240,3 +240,19 @@ describe('session start and prompt hooks', () => {
     expect(r.status).toBe(0);
   });
 });
+
+describe('pre-tool-use: gate commands', () => {
+  it('denies running a configured gate and points to wg check', () => {
+    repo.setConfig({ gates: [{ name: 'test', command: 'pnpm run test' }] });
+    const r = bash('pnpm run test 2>&1 | tail');
+    expect(r.decision).toBe('deny');
+    expect(r.reason).toContain('wg check');
+    expect(bash('pnpm exec vitest run test/a.test.ts').decision).toBeUndefined();
+  });
+
+  it('allows gate commands during a bypass', () => {
+    repo.setConfig({ gates: [{ name: 'test', command: 'pnpm run test' }] });
+    hook('user-prompt-submit', { prompt: '[quick] run tests' });
+    expect(bash('pnpm run test').decision).toBeUndefined();
+  });
+});

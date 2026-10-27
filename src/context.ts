@@ -18,8 +18,8 @@ export function rulesText(repo: Repo): string {
     ...(c.gates.length === 0
       ? []
       : [
-          `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join('; ')}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed.`,
-          '- wg done can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again.',
+          `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join('; ')}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed; to run all gates without merging, use wg check <id>.`,
+          '- wg done and wg check can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again.',
         ]),
     '- Rebase conflicts: resolve the files, then wg sync <id> --continue (or --abort), then wg done again.',
     '- Blocked on the owner (decision, information, approval, access)? Run: wg block <id> --needs "<exactly what you need>" and tell the owner.',

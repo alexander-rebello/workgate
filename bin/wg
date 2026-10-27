@@ -12658,7 +12658,7 @@ import { writeFileSync as writeFileSync2, mkdirSync as mkdirSync2 } from "node:f
 import { dirname, join as join2, relative } from "node:path";
 
 // src/state.ts
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 // node_modules/.pnpm/zod@4.6.7/node_modules/zod/v4/classic/external.js
@@ -32444,39 +32444,72 @@ function bypassActive(repo, session, now = /* @__PURE__ */ new Date()) {
   }
   return session !== void 0 && bypass.session === session;
 }
-var LOCK_STALE_MS = 12e4;
 var LOCK_WAIT_MS = 3e4;
+var LOCK_UNOWNED_STALE_MS = 1e4;
+var LockOwnerSchema = external_exports.object({ pid: external_exports.number().int(), token: external_exports.string() });
 function sleep(ms) {
   return new Promise((resolve3) => setTimeout(resolve3, ms));
 }
+function lockAbandoned(dir) {
+  const owner = LockOwnerSchema.safeParse(readJson(join(dir, "owner.json")));
+  if (owner.success) return !pidAlive(owner.data.pid);
+  try {
+    return Date.now() - statSync(dir).mtimeMs > LOCK_UNOWNED_STALE_MS;
+  } catch {
+    return true;
+  }
+}
+function reclaim(dir) {
+  const tomb = `${dir}.stale-${process.pid}-${Date.now()}`;
+  try {
+    renameSync(dir, tomb);
+  } catch {
+    return;
+  }
+  rmSync(tomb, { recursive: true, force: true });
+}
+var tokenCounter = 0;
+function tryLock(dir) {
+  try {
+    mkdirSync(dir);
+  } catch {
+    if (lockAbandoned(dir)) reclaim(dir);
+    return void 0;
+  }
+  tokenCounter += 1;
+  const token = `${process.pid}-${Date.now()}-${tokenCounter}`;
+  writeFileSync(join(dir, "owner.json"), JSON.stringify({ pid: process.pid, token }));
+  return token;
+}
+function unlock(dir, token) {
+  const owner = LockOwnerSchema.safeParse(readJson(join(dir, "owner.json")));
+  if (owner.success && owner.data.token === token) rmSync(dir, { recursive: true, force: true });
+}
 async function withLock(repo, fn) {
   ensure(repo.stateDir);
-  const lock = join(repo.stateDir, "lock");
+  const dir = join(repo.stateDir, "lock");
   const deadline = Date.now() + LOCK_WAIT_MS;
-  for (; ; ) {
-    try {
-      mkdirSync(lock);
-      break;
-    } catch {
-      let age;
-      try {
-        age = Date.now() - statSync(lock).mtimeMs;
-      } catch {
-        if (Date.now() > deadline) throw new WgError("Timed out waiting for the workgate lock.");
-        continue;
-      }
-      if (age > LOCK_STALE_MS) {
-        rmSync(lock, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() > deadline) throw new WgError("Timed out waiting for the workgate lock.");
-      await sleep(100);
-    }
+  let token = tryLock(dir);
+  while (token === void 0) {
+    if (Date.now() > deadline) throw new WgError("Timed out waiting for the workgate lock.");
+    await sleep(100);
+    token = tryLock(dir);
   }
   try {
     return await fn();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    unlock(dir, token);
+  }
+}
+async function exclusive(repo, name, busy, fn) {
+  ensure(repo.stateDir);
+  const dir = join(repo.stateDir, name);
+  const token = tryLock(dir) ?? tryLock(dir);
+  if (token === void 0) throw new WgError(busy);
+  try {
+    return await fn();
+  } finally {
+    unlock(dir, token);
   }
 }
 var GateSlotSchema = external_exports.object({ pid: external_exports.number().int(), id: external_exports.number().int(), started: external_exports.string() });
@@ -32540,7 +32573,7 @@ async function withGateSlot(repo, id, options, fn) {
         slot = dir;
       } catch {
         if (slotStale(dir)) {
-          rmSync(dir, { recursive: true, force: true });
+          reclaim(dir);
           i--;
         }
       }
@@ -33041,8 +33074,8 @@ function rulesText(repo) {
     '- Save progress with: wg checkpoint "<message>". Mutating git (commit, merge, rebase, push, branch, worktree, reset, stash, checkout) is denied; read-only git is fine.',
     `- Finish with: wg done <id> --outcome "<what changed>" (--report "<plain sentence for the owner>" | --no-report).${attest} It rebases, runs the gates (${gates}), merges into ${c.integrationBranch} and cleans up.`,
     ...c.gates.length === 0 ? [] : [
-      `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join("; ")}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed.`,
-      "- wg done can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again."
+      `- Do not run the gate commands yourself (${c.gates.map((g) => g.command).join("; ")}): wg done runs them, at most ${c.gateConcurrency} at a time across all sessions, and prints what failed. Full builds and test suites from several agents at once exhaust the machine. While working, run only targeted checks such as the tests of the files you changed; to run all gates without merging, use wg check <id>.`,
+      "- wg done and wg check can wait for a free gate slot. Run it with your longest command timeout (600000 ms for the Bash tool). If it times out, is interrupted or reports busy slots, nothing was merged; run it again."
     ],
     "- Rebase conflicts: resolve the files, then wg sync <id> --continue (or --abort), then wg done again.",
     '- Blocked on the owner (decision, information, approval, access)? Run: wg block <id> --needs "<exactly what you need>" and tell the owner.',
@@ -33333,6 +33366,20 @@ function isReadOnlyGit(inv) {
 }
 function mutatingGit(command) {
   return findGitInvocations(command).filter((inv) => !isReadOnlyGit(inv));
+}
+var REDIRECTION = /^\d*(<|>|&>)/;
+function runsGateCommand(command, gateCommands) {
+  const runs = splitCommands(command);
+  for (const gate of gateCommands) {
+    for (const gateWords of splitCommands(gate)) {
+      if (gateWords.length === 0) continue;
+      const hit = runs.some(
+        (words) => gateWords.every((w, i) => words[i] === w) && words.slice(gateWords.length).every((w) => REDIRECTION.test(w))
+      );
+      if (hit) return gate;
+    }
+  }
+  return void 0;
 }
 var PROTECTED_STATE = /\.git\/workgate|\bbypass\.json\b/;
 function touchesProtectedState(command) {
@@ -33940,6 +33987,41 @@ ${tail}`);
     }
   }
 }
+async function inGateSlot(repo, id, progress, fn) {
+  return withGateSlot(
+    repo,
+    id,
+    {
+      onWait: (holders) => {
+        const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(", ");
+        progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === "" ? "" : `: ${busy}`})...`);
+      },
+      onAbort: killActiveShells
+    },
+    fn
+  );
+}
+async function checkItem(repo, id, progress = () => void 0) {
+  const item = findItem(loadItems(repo), id);
+  if (item.meta.status !== "active" || item.meta.branch === void 0) {
+    throw new WgError(`#${id} is ${item.meta.status}; wg check runs the gates of active items only.`);
+  }
+  const info = await worktreeOfBranch(repo, item.meta.branch);
+  if (info === void 0) throw new WgError(`Worktree for #${id} not found.`);
+  if (repo.config.gates.length === 0) return ["No gates configured."];
+  const log = [];
+  await inGateSlot(repo, id, progress, () => runGates(repo, info.path, log, progress));
+  log.push("All gates passed.");
+  return log;
+}
+function isBookkeepingPath(repo, path2) {
+  const c = repo.config;
+  return path2.startsWith(`${c.todosDir}/`) || path2 === c.indexFile || c.reportFile !== null && path2 === c.reportFile;
+}
+async function movedOnlyByBookkeeping(repo, base) {
+  const out = await git(repo.mainRoot, ["diff", "--name-only", base, repo.config.integrationBranch]);
+  return out.split("\n").filter((l) => l !== "").every((path2) => isBookkeepingPath(repo, path2));
+}
 var DONE_ATTEMPTS = 3;
 function validateDoneOptions(options) {
   if (options.report === void 0 && !options.noReport) {
@@ -33949,34 +34031,29 @@ function validateDoneOptions(options) {
 }
 async function doneItem(repo, id, options, progress = () => void 0) {
   validateDoneOptions(options);
-  const log = [];
-  for (let attempt = 1; ; attempt++) {
-    const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
-    if ("item" in prepared) return prepared;
-    if (repo.config.gates.length > 0) {
-      await withGateSlot(
-        repo,
-        id,
-        {
-          onWait: (holders) => {
-            const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(", ");
-            progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === "" ? "" : `: ${busy}`})...`);
-          },
-          onAbort: killActiveShells
-        },
-        () => runGates(repo, prepared.worktree, log, progress)
-      );
-    }
-    const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
-    if (finished !== "moved") return finished;
-    if (attempt >= DONE_ATTEMPTS) {
-      throw new WgError(
-        `${repo.config.integrationBranch} moved during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`
-      );
-    }
-    log.push(`${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again`);
-    progress(log[log.length - 1] ?? "");
-  }
+  return exclusive(repo, `done-${id}`, `wg done #${id} is already running.`, async () => {
+    const log = [];
+    const needsGates = repo.config.gates.length > 0 && findItem(loadItems(repo), id).meta.status === "active";
+    const attempts = async () => {
+      for (let attempt = 1; ; attempt++) {
+        const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
+        if ("item" in prepared) return prepared;
+        if (needsGates) await runGates(repo, prepared.worktree, log, progress);
+        const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
+        if (typeof finished !== "string") return finished;
+        if (attempt >= DONE_ATTEMPTS) {
+          throw new WgError(
+            `${repo.config.integrationBranch} or the worktree of #${id} changed during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`
+          );
+        }
+        log.push(
+          finished === "moved" ? `${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again` : `the worktree of #${id} changed while the gates ran; committing and running them again`
+        );
+        progress(log[log.length - 1] ?? "");
+      }
+    };
+    return needsGates ? inGateSlot(repo, id, progress, attempts) : attempts();
+  });
 }
 async function prepareDone(repo, id, options, log) {
   await requireIntegration(repo);
@@ -34041,10 +34118,10 @@ async function finishDone(repo, id, options, prepared, log) {
   }
   const info = await worktreeOfBranch(repo, branch);
   if (info === void 0) throw new WgError(`Worktree for #${id} disappeared while its gates ran. Nothing was merged.`);
-  if (await git(repo.mainRoot, ["rev-parse", branch]) !== prepared.head) {
-    throw new WgError(`${branch} got new commits while its gates ran. Nothing was merged; run wg done again.`);
-  }
-  if (await git(repo.mainRoot, ["rev-parse", repo.config.integrationBranch]) !== prepared.base) return "moved";
+  const head = await git(repo.mainRoot, ["rev-parse", branch]);
+  if (head !== prepared.head || await git(info.path, ["status", "--porcelain"]) !== "") return "changed";
+  const base = await git(repo.mainRoot, ["rev-parse", repo.config.integrationBranch]);
+  if (base !== prepared.base && !await movedOnlyByBookkeeping(repo, prepared.base)) return "moved";
   if (!await isCleanTracked(repo.mainRoot)) {
     throw new WgError("The main checkout has uncommitted changes. Commit or stash them, then retry.");
   }
@@ -34215,6 +34292,12 @@ async function gateBash(input2) {
     return deny("Only the owner may manage workgate bypass or its state; run it yourself with the ! prefix.");
   }
   if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
+  const gate = runsGateCommand(command, repo.config.gates.map((g) => g.command));
+  if (gate !== void 0 && !bypassActive(repo, input2.session_id)) {
+    return deny(
+      `Workgate: "${gate}" is a gate. Gates run at most ${repo.config.gateConcurrency} at a time across all agents to limit memory use: run wg check <id> to run all gates without merging, or wg done to finish. Targeted checks (a single test file, one package) are fine.`
+    );
+  }
   const mutating = mutatingGit(command);
   if (mutating.length === 0) return warnUnclaimedWrites(input2, command);
   if (bypassActive(repo, input2.session_id)) {
@@ -34799,6 +34882,12 @@ ${result.conflicts.join("\n")}
 Resolve them, then run: wg sync ${item.meta.id} --continue`);
     process.exitCode = 1;
   }
+});
+program2.command("check").description("Run all gates in an item's worktree without merging (waits for a free gate slot)").argument("[id]", "item id (default: current worktree)", parseId).action(async (id) => {
+  const repo = await repoForCwd();
+  const lines = await checkItem(repo, await resolveItemId(repo, id), (line2) => process.stderr.write(`${line2}
+`));
+  for (const line2 of lines) print(line2);
 });
 program2.command("done").description("Rebase, run gates, merge into the integration branch, close the item and clean up").argument("[id]", "item id (default: current worktree)", parseId).requiredOption("--outcome <text>", "what changed, in one or two sentences").option("--report <text>", "plain-language line for the owner (user-visible changes)").option("--no-report", "nothing user-visible to report").option("--attest <name=value>", "answer to a configured attestation (ok, n/a or unchanged)", collectAttest, {}).option("--attest-reason <name=text>", "why the required files already cover the change (required with unchanged)", collectAttestReason, {}).action(async (id, opts) => {
   const repo = await repoForCwd();
