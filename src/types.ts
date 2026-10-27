@@ -10,6 +10,10 @@ export type Severity = (typeof SEVERITIES)[number];
 
 const itemId = z.number().int().positive();
 
+export const REF_KEY = /^[a-z][a-z0-9-]*$/;
+export const EVENTS = ['add', 'claim', 'block', 'done', 'drop'] as const;
+export type WgEvent = (typeof EVENTS)[number];
+
 export const ItemMetaSchema = z
   .object({
     id: itemId,
@@ -25,6 +29,8 @@ export const ItemMetaSchema = z
     needs: z.string().min(1).optional(),
     after: z.array(itemId).optional(),
     parent: itemId.optional(),
+    /** Links to external trackers, e.g. { taiga: "ERP-12" }. */
+    refs: z.record(z.string().regex(REF_KEY), z.string().min(1)).optional(),
     verified: z.boolean().optional(),
     outcome: z.string().min(1).optional(),
     report: z.string().min(1).optional(),
@@ -71,6 +77,12 @@ const GateSchema = z.object({
   command: z.string().min(1),
 });
 
+const EventHookSchema = z.object({
+  on: z.array(z.enum(EVENTS)).min(1),
+  command: z.string().min(1),
+  timeoutSeconds: z.number().int().positive().default(30),
+});
+
 const AttestationSchema = z.object({
   name: z.string().min(1).regex(/^[a-z][a-z0-9-]*$/),
   description: z.string().min(1),
@@ -97,11 +109,13 @@ export const ConfigSchema = z
     /** How long `wg done` waits for a free gate slot before giving up without merging. */
     gateWaitMinutes: z.number().positive().default(8),
     attestations: z.array(AttestationSchema).default([]),
+    hooks: z.array(EventHookSchema).default([]),
   })
   .strict();
 
 export type Config = z.infer<typeof ConfigSchema>;
 export type Attestation = z.infer<typeof AttestationSchema>;
+export type EventHook = z.infer<typeof EventHookSchema>;
 
 export interface Repo {
   /** Root of the worktree the command runs in. */

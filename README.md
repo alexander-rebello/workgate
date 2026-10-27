@@ -47,7 +47,7 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 
 | Command | Purpose |
 | --- | --- |
-| `wg add <title> --kind k [--sev S] [--after ids] [--parent id] [--needs text]` | create an item (body from `--body` or stdin) |
+| `wg add <title> --kind k [--sev S] [--after ids] [--parent id] [--needs text] [--ref name=value]` | create an item (body from `--body` or stdin); `--ref` links an external tracker and is repeatable |
 | `wg list`, `wg find <text>`, `wg show <id>`, `wg next`, `wg stats` | views; most take `--json` |
 | `wg claim <id>` | status `active`, create branch and worktree, print the path |
 | `wg resume <id>`, `wg release <id>` | re-attach after an interruption, or give an item back |
@@ -89,7 +89,8 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
       "watch": ["src/**"],
       "require": ["docs/rules/**", "docs/architecture/**"]
     }
-  ]
+  ],
+  "hooks": [{ "on": ["add", "claim", "done"], "command": "./scripts/sync-tracker.sh", "timeoutSeconds": 30 }]
 }
 ```
 
@@ -97,6 +98,8 @@ Kinds: `bug`, `feature`, `rework`, `decision`. Bugs may carry `sev: S1..S4`. Ite
 - `gateConcurrency` limits how many `wg done` calls run their gates at the same time, across all sessions on the machine (default 1). The others wait in line, printing who holds the slots, for up to `gateWaitMinutes` (default 8). After that they give up without merging. A slot whose process died is reclaimed, and interrupting `wg done` stops its gate commands. Gates run without the repository lock, so other `wg` commands keep working during a long build. If the integration branch moved in the meantime, `wg done` rebases and runs the gates again before merging.
 - `attestations` become mandatory `--attest name=ok|n/a|unchanged` answers on `wg done`. `n/a` is refused when a `watch` file changed and no `require` file did; `ok` is refused when no `require` file changed. `unchanged` means the `require` files were reviewed and already cover the change; it needs `--attest-reason name="<why>"`, which is recorded in the item (`attestReason`) and the merge commit body.
 - `commitSuffix` is appended to bookkeeping commit subjects (for example ` [skip ci]`). The merge commit written by `wg done` never gets it, since it carries the real change and is what a push ships.
+- `hooks` run after a successful `add`, `claim`, `block`, `done` or `drop` (not `resume`, `release` or `unblock`), through the shell in the main checkout, with `{ "event": "<event>", "item": { ...frontmatter, "file": "<absolute path>" } }` on stdin. The item is read after the operation, so `status` is the new one. Their stdout is printed after the command's output (to stderr with `--json`). A non-zero exit or a timeout (`timeoutSeconds`, default 30; the hook's whole process group is killed) is printed as a warning and never changes the exit code.
+- Item `refs` (`wg add --ref taiga=ERP-12`) are stored in the frontmatter as a `name: value` map and included in `--json` output and hook payloads. Names match `^[a-z][a-z0-9-]*$`; values are non-empty.
 - `reportFile`, when set, receives a `- date - text (#id)` line for every `--report`.
 
 ## What the plugin enforces

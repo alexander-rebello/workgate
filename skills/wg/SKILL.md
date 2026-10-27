@@ -38,7 +38,7 @@ Use AskUserQuestion with up to 4 options, in this priority: the top stale item (
 
 ## 3. Create
 
-Ask only for what is missing: title and kind (`bug|feature|rework|decision`); severity (`S1`..`S4`) for bugs; for a decision, what the owner must answer (`--needs`). Run `wg add "<title>" --kind <kind> [--sev <S>] [--needs "<text>"]`, with the body from the conversation on stdin, and print the new id. Do not claim it unless the user says to start. Use a quoted heredoc so markdown passes through literally:
+Ask only for what is missing: title and kind (`bug|feature|rework|decision`); severity (`S1`..`S4`) for bugs; for a decision, what the owner must answer (`--needs`). Run `wg add "<title>" --kind <kind> [--sev <S>] [--needs "<text>"] [--ref <name>=<value>]` (`--ref` links an external tracker ticket, e.g. `--ref taiga=ERP-12`; repeatable), with the body from the conversation on stdin, and print the new id. Do not claim it unless the user says to start. Use a quoted heredoc so markdown passes through literally:
 
 ```sh
 wg add "Retry flaky upload" --kind bug --sev S3 <<'EOF'

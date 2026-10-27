@@ -3,6 +3,7 @@ import { Command, InvalidArgumentError, Option } from 'commander';
 import { endBypass, parseDuration, startBypass } from './bypass.js';
 import { computeStats, nextItems, planProgress } from './derive.js';
 import { WgError } from './errors.js';
+import { fireEvent } from './events.js';
 import { readStdin } from './stdin.js';
 import { runHook, type HookName } from './hooks.js';
 import { initRepo } from './init.js';
@@ -33,7 +34,7 @@ import { readBypass, isStale, leaseAgeMinutes } from './state.js';
 import { renderStatusline } from './statusline.js';
 import { installStatusline } from './statusline-install.js';
 import { writeIndex } from './indexgen.js';
-import { KINDS, SEVERITIES, STATUSES, type Item, type Kind, type Repo, type Severity, type Status } from './types.js';
+import { KINDS, REF_KEY, SEVERITIES, STATUSES, type Item, type Kind, type Repo, type Severity, type Status, type WgEvent } from './types.js';
 
 function parseId(value: string): number {
   const id = Number(value.replace(/^#/, ''));
@@ -57,8 +58,26 @@ function collectAttestReason(value: string, previous: Record<string, string>): R
   return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
 }
 
+function collectRef(value: string, previous: Record<string, string>): Record<string, string> {
+  const eq = value.indexOf('=');
+  const key = eq < 0 ? value : value.slice(0, eq);
+  const val = eq < 0 ? '' : value.slice(eq + 1);
+  if (!REF_KEY.test(key)) throw new InvalidArgumentError('Ref names are lowercase letters, digits and dashes, starting with a letter.');
+  if (val === '') throw new InvalidArgumentError('Expected name=value with a non-empty value.');
+  return { ...previous, [key]: val };
+}
+
 function print(text: string): void {
   process.stdout.write(`${text}\n`);
+}
+
+/** Runs after the operation succeeded and outside the lock; hook results never change the exit code. */
+async function emit(repo: Repo, event: WgEvent, id: number, json: boolean): Promise<void> {
+  if (!repo.config.hooks.some((h) => h.on.includes(event))) return;
+  const item = findItem(loadItems(repo), id);
+  const { output, warnings } = await fireEvent(repo, event, item);
+  if (output !== '') (json ? process.stderr : process.stdout).write(output.endsWith('\n') ? output : `${output}\n`);
+  for (const w of warnings) process.stderr.write(`warning: ${w}\n`);
 }
 
 function summary(repo: Repo, item: Item): string {
@@ -125,16 +144,20 @@ program
   .option('--after <ids>', 'comma-separated ids this item depends on', parseIds)
   .option('--parent <id>', 'parent item id', parseId)
   .option('--needs <text>', 'create the item blocked, stating what the owner must provide')
+  .option('--ref <name=value>', 'link to an external tracker, e.g. taiga=ERP-12 (repeatable)', collectRef, {})
   .option('--json', 'machine-readable output')
   .action(
     async (
       title: string,
-      opts: { kind: Kind; sev?: Severity; body?: string; after?: number[]; parent?: number; needs?: string; json?: boolean },
+      opts: { kind: Kind; sev?: Severity; body?: string; after?: number[]; parent?: number; needs?: string; ref: Record<string, string>; json?: boolean },
     ) => {
       const repo = await repoForCwd();
       const body = opts.body ?? (process.stdin.isTTY ? undefined : await readStdin());
-      const item = await addItem(repo, { title, kind: opts.kind, sev: opts.sev, body, after: opts.after, parent: opts.parent, needs: opts.needs });
+      const item = await addItem(repo, {
+        title, kind: opts.kind, sev: opts.sev, body, after: opts.after, parent: opts.parent, needs: opts.needs, refs: opts.ref,
+      });
       print(opts.json === true ? JSON.stringify(jsonItem(repo, item)) : `Created #${item.meta.id} (${item.meta.status}): ${item.file}`);
+      await emit(repo, 'add', item.meta.id, opts.json === true);
     },
   );
 
@@ -191,6 +214,7 @@ program
     }
     print(summary(repo, item));
     print(`file: ${item.file}`);
+    for (const [name, value] of Object.entries(item.meta.refs ?? {})) print(`ref ${name}: ${value}`);
     if (item.body !== '') print(`\n${item.body}`);
   });
 
@@ -239,6 +263,7 @@ program
   .action(async (id: number, opts: { json?: boolean }) => {
     const repo = await repoForCwd();
     printClaim(await claimItem(repo, id), opts.json, repo);
+    await emit(repo, 'claim', id, opts.json === true);
   });
 
 program
@@ -268,8 +293,10 @@ program
   .argument('<id>', 'item id', parseId)
   .requiredOption('--needs <text>', 'exactly what the owner must provide')
   .action(async (id: number, opts: { needs: string }) => {
-    await blockItem(await repoForCwd(), id, opts.needs);
+    const repo = await repoForCwd();
+    await blockItem(repo, id, opts.needs);
     print(`Blocked #${id}.`);
+    await emit(repo, 'block', id, false);
   });
 
 program
@@ -289,8 +316,10 @@ program
   .requiredOption('--reason <text>')
   .option('--force', 'discard unmerged commits')
   .action(async (id: number, opts: { reason: string; force?: boolean }) => {
-    await dropItem(await repoForCwd(), id, opts.reason, opts.force === true);
+    const repo = await repoForCwd();
+    await dropItem(repo, id, opts.reason, opts.force === true);
     print(`Dropped #${id}.`);
+    await emit(repo, 'drop', id, false);
   });
 
 program
@@ -421,6 +450,7 @@ program
     }, (line) => process.stderr.write(`${line}\n`));
     for (const line of result.log) print(line);
     print(`Done #${itemId}.`);
+    await emit(repo, 'done', itemId, false);
   });
 
 program

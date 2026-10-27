@@ -18,6 +18,7 @@ const KEY_ORDER: readonly (keyof ItemMeta)[] = [
   'needs',
   'after',
   'parent',
+  'refs',
   'verified',
   'outcome',
   'report',

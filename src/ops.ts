@@ -76,6 +76,7 @@ export interface AddOptions {
   after?: number[] | undefined;
   parent?: number | undefined;
   needs?: string | undefined;
+  refs?: Record<string, string> | undefined;
 }
 
 export async function addItem(repo: Repo, options: AddOptions): Promise<Item> {
@@ -101,6 +102,7 @@ export async function addItem(repo: Repo, options: AddOptions): Promise<Item> {
       ...(needs === undefined ? {} : { needs }),
       ...(options.after === undefined || options.after.length === 0 ? {} : { after: options.after }),
       ...(options.parent === undefined ? {} : { parent: options.parent }),
+      ...(options.refs === undefined || Object.keys(options.refs).length === 0 ? {} : { refs: options.refs }),
     };
     const body = options.body !== undefined && options.body.trim() !== '' ? options.body : KIND_TEMPLATES[options.kind];
     const item = createItem(repo, meta, body);
