@@ -58,4 +58,4 @@ To change the body of an item that has not been claimed (`todo`, or `blocked` wi
 - Read-only requests need no item.
 - Work that does not come from an existing item gets one via `wg add` before any file is edited.
 - Finish with `wg done <id> ...` (longest Bash timeout; it may wait for a gate slot); do not commit, merge or push yourself.
-- Do not run the full gate commands yourself; `wg done` runs them and reports failures. Targeted checks while working are fine.
+- Do not run the full gate commands yourself (the hook denies them); `wg done` runs them and reports failures, and `wg check <id>` runs them without merging (also with the longest timeout). Targeted checks while working are fine.

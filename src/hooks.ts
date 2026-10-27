@@ -4,7 +4,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { endBypass, startBypass } from './bypass.js';
 import { currentItemText, digestText, rulesText } from './context.js';
-import { mutatingGit, shellWriteTargets, touchesProtectedState, writesProtectedPaths } from './guard.js';
+import { mutatingGit, runsGateCommand, shellWriteTargets, touchesProtectedState, writesProtectedPaths } from './guard.js';
 import { loadAll } from './items.js';
 import { itemForToplevel } from './ops.js';
 import { tryResolveRepo } from './repo.js';
@@ -103,6 +103,12 @@ async function gateBash(input: HookInput): Promise<HookOutput | undefined> {
     return deny('Only the owner may manage workgate bypass or its state; run it yourself with the ! prefix.');
   }
   if (writesProtectedPaths(command, itemFilePaths(repo))) return deny(ITEM_FILES_HELP);
+  const gate = runsGateCommand(command, repo.config.gates.map((g) => g.command));
+  if (gate !== undefined && !bypassActive(repo, input.session_id)) {
+    return deny(
+      `Workgate: "${gate}" is a gate. Gates run at most ${repo.config.gateConcurrency} at a time across all agents to limit memory use: run wg check <id> to run all gates without merging, or wg done to finish. Targeted checks (a single test file, one package) are fine.`,
+    );
+  }
   const mutating = mutatingGit(command);
   if (mutating.length === 0) return warnUnclaimedWrites(input, command);
   if (bypassActive(repo, input.session_id)) {

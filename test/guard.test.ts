@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mutatingGit, shellWriteTargets, touchesProtectedState } from '../src/guard.js';
+import { mutatingGit, runsGateCommand, shellWriteTargets, touchesProtectedState } from '../src/guard.js';
 
 const denied = (cmd: string): string[] => mutatingGit(cmd).map((m) => m.subcommand);
 
@@ -120,4 +120,21 @@ describe('shellWriteTargets', () => {
   ])('finds nothing in %s', (cmd) => {
     expect(shellWriteTargets(cmd)).toEqual([]);
   });
+});
+describe('runsGateCommand', () => {
+  const gates = ['pnpm run test', 'pnpm run lint && pnpm run typecheck'];
+  it.each([
+    ['pnpm run test', 'pnpm run test'],
+    ['pnpm run test 2>&1 | tail -20', 'pnpm run test'],
+    ['cd /x && pnpm run test', 'pnpm run test'],
+    ['pnpm run typecheck', 'pnpm run lint && pnpm run typecheck'],
+  ])('flags %s', (cmd, gate) => {
+    expect(runsGateCommand(cmd, gates)).toBe(gate);
+  });
+  it.each(['pnpm run test -- test/a.test.ts', 'pnpm exec vitest run test/a.test.ts', 'echo "pnpm run test"', 'pnpm run build'])(
+    'allows %s',
+    (cmd) => {
+      expect(runsGateCommand(cmd, gates)).toBeUndefined();
+    },
+  );
 });

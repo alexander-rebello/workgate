@@ -1,5 +1,5 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, utimesSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WG, makeRepo, worktreeFrom, type TestRepo } from './helpers.js';
@@ -59,6 +59,14 @@ function running(pid: number): boolean {
   return !spawnSync('ps', ['-o', 'stat=', '-p', String(pid)], { encoding: 'utf8' }).stdout.trim().startsWith('Z');
 }
 
+async function waitFor(check: () => boolean, ms = 10_000): Promise<void> {
+  const until = Date.now() + ms;
+  while (!check()) {
+    if (Date.now() > until) throw new Error('condition not met in time');
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+}
+
 function occupySlot(r: TestRepo, pid: number, id: number): void {
   const dir = join(r.dir, '.git', 'workgate', 'gates', 'slot-0');
   mkdirSync(dir, { recursive: true });
@@ -76,10 +84,10 @@ describe('gate slots', () => {
     const results = await Promise.all([done(repo, a), done(repo, b)]);
     expect(results.map((r) => r.code)).toEqual([0, 0]);
     const events = gate.events();
-    // The second merge finds the integration branch moved and gates again: three runs, never overlapping.
-    expect(events).toEqual(['start', 'end', 'start', 'end', 'start', 'end']);
+    // The second call rebases only after it got the slot, so it sees the first merge and gates once.
+    expect(events).toEqual(['start', 'end', 'start', 'end']);
     expect(results.map((r) => r.err).join('\n')).toContain('waiting for a gate slot');
-    expect(results.map((r) => r.out).join('\n')).toContain('moved while the gates ran');
+    expect(results.map((r) => r.out).join('\n')).not.toContain('moved while the gates ran');
     expect(repo.wgOk(['list', '--status', 'done'])).toContain('Second');
     expect(repo.git(['show', 'HEAD:a.txt'])).toBe('First');
     expect(repo.git(['show', 'HEAD:b.txt'])).toBe('Second');
@@ -142,7 +150,8 @@ describe('gate slots', () => {
 
   it('does not hold the repository lock while the gates run', async () => {
     repo = makeRepo();
-    repo.setConfig(recordingGate(repo, 4).config);
+    const gate = recordingGate(repo, 4);
+    repo.setConfig(gate.config);
     const id = claimWithChange(repo, 'Slow', 's.txt');
     const pending = done(repo, id);
     await new Promise((resolve) => setTimeout(resolve, 1500));
@@ -151,5 +160,107 @@ describe('gate slots', () => {
     expect(add.code).toBe(0);
     expect(Date.now() - started).toBeLessThan(2500);
     expect((await pending).code).toBe(0);
+    // The add was a bookkeeping commit only, which cannot change gate results.
+    expect(gate.events()).toEqual(['start', 'end']);
   }, 30_000);
+
+  it('gates again when code lands on the integration branch meanwhile', async () => {
+    repo = makeRepo();
+    const gate = recordingGate(repo, 2);
+    repo.setConfig(gate.config);
+    const id = claimWithChange(repo, 'Racy', 'a.txt');
+    const pending = done(repo, id);
+    await waitFor(() => gate.events().length > 0);
+    repo.write('other.txt', 'y\n');
+    repo.git(['add', 'other.txt']);
+    repo.git(['commit', '-q', '-m', 'other']);
+    const r = await pending;
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('moved while the gates ran');
+    expect(gate.events()).toEqual(['start', 'end', 'start', 'end']);
+    expect(repo.git(['show', 'HEAD:a.txt'])).toBe('Racy');
+    expect(repo.git(['show', 'HEAD:other.txt'])).toBe('y');
+  }, 30_000);
+
+  it('gates again and merges edits made in the worktree while the gates ran', async () => {
+    repo = makeRepo();
+    const gate = recordingGate(repo, 2);
+    repo.setConfig(gate.config);
+    const id = claimWithChange(repo, 'Edited', 'a.txt');
+    const wt = worktreeFrom(repo.wgOk(['resume', String(id)]));
+    const pending = done(repo, id);
+    await waitFor(() => gate.events().length > 0);
+    repo.write('late.txt', 'late\n', wt);
+    const r = await pending;
+    expect(r.code).toBe(0);
+    expect(r.out).toContain('changed while the gates ran');
+    expect(gate.events()).toEqual(['start', 'end', 'start', 'end']);
+    expect(repo.git(['show', 'HEAD:late.txt'])).toBe('late');
+  }, 30_000);
+
+  it('refuses a second wg done for an item whose wg done is running', async () => {
+    repo = makeRepo();
+    const gate = recordingGate(repo, 2);
+    repo.setConfig(gate.config);
+    const id = claimWithChange(repo, 'Twice', 'a.txt');
+    const first = done(repo, id);
+    await waitFor(() => gate.events().length > 0);
+    const second = await done(repo, id);
+    expect(second.code).not.toBe(0);
+    expect(second.err).toContain('already running');
+    expect((await first).code).toBe(0);
+  }, 30_000);
+});
+
+describe('wg check', () => {
+  it('runs the gates in the item worktree without merging', () => {
+    repo = makeRepo();
+    const gate = recordingGate(repo, 0);
+    repo.setConfig(gate.config);
+    const id = claimWithChange(repo, 'Checked', 'a.txt');
+    const before = repo.git(['rev-parse', 'HEAD']);
+    expect(repo.wgOk(['check', String(id)])).toContain('All gates passed');
+    expect(gate.events()).toEqual(['start', 'end']);
+    expect(repo.git(['rev-parse', 'HEAD'])).toBe(before);
+    expect(repo.wgOk(['list', '--status', 'active'])).toContain('Checked');
+  });
+
+  it('waits for a gate slot like wg done', async () => {
+    repo = makeRepo();
+    repo.setConfig({ ...recordingGate(repo, 0).config, gateWaitMinutes: 0.03 });
+    const id = claimWithChange(repo, 'Queued', 'a.txt');
+    occupySlot(repo, process.pid, 97);
+    const r = await wgAsync(repo, ['check', String(id)]);
+    expect(r.code).not.toBe(0);
+    expect(r.err).toContain('waiting for a gate slot');
+    expect(r.err).toContain('#97');
+  }, 30_000);
+});
+
+describe('repository lock', () => {
+  const lockDir = (r: TestRepo): string => join(r.dir, '.git', 'workgate', 'lock');
+
+  it('takes over a lock whose owner process is gone', () => {
+    repo = makeRepo();
+    mkdirSync(lockDir(repo), { recursive: true });
+    writeFileSync(join(lockDir(repo), 'owner.json'), JSON.stringify({ pid: 2147483646, token: 'x' }));
+    const started = Date.now();
+    repo.wgOk(['add', 'After crash', '--kind', 'feature']);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it('never takes a lock from a live owner, however old', async () => {
+    repo = makeRepo();
+    mkdirSync(lockDir(repo), { recursive: true });
+    writeFileSync(join(lockDir(repo), 'owner.json'), JSON.stringify({ pid: process.pid, token: 'x' }));
+    const hourAgo = new Date(Date.now() - 3_600_000);
+    utimesSync(lockDir(repo), hourAgo, hourAgo);
+    const child = spawn('node', [WG, 'add', 'Blocked', '--kind', 'feature'], { cwd: repo.dir, stdio: 'ignore' });
+    let exited = false;
+    child.on('close', () => (exited = true));
+    await new Promise((resolve) => setTimeout(resolve, 3_000));
+    expect(exited).toBe(false);
+    child.kill('SIGKILL');
+    expect(repo.wgOk(['list'])).not.toContain('Blocked');
+  }, 15_000);
 });

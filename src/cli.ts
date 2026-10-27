@@ -11,6 +11,7 @@ import { findItem, loadAll, loadItems } from './items.js';
 import {
   addItem,
   blockItem,
+  checkItem,
   checkpoint,
   claimItem,
   doctor,
@@ -426,6 +427,16 @@ program
       print(`Conflicts in:\n${result.conflicts.join('\n')}\nResolve them, then run: wg sync ${item.meta.id} --continue`);
       process.exitCode = 1;
     }
+  });
+
+program
+  .command('check')
+  .description("Run all gates in an item's worktree without merging (waits for a free gate slot)")
+  .argument('[id]', 'item id (default: current worktree)', parseId)
+  .action(async (id: number | undefined) => {
+    const repo = await repoForCwd();
+    const lines = await checkItem(repo, await resolveItemId(repo, id), (line) => process.stderr.write(`${line}\n`));
+    for (const line of lines) print(line);
   });
 
 program

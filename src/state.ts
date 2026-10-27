@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { z } from 'zod';
 import { WgError } from './errors.js';
@@ -85,44 +85,92 @@ export function bypassActive(repo: Repo, session: string | undefined, now: Date 
   return session !== undefined && bypass.session === session;
 }
 
-const LOCK_STALE_MS = 120_000;
 const LOCK_WAIT_MS = 30_000;
+/** A lock dir whose owner file never appeared belongs to a process that died between mkdir and write. */
+const LOCK_UNOWNED_STALE_MS = 10_000;
+
+const LockOwnerSchema = z.object({ pid: z.number().int(), token: z.string() });
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-/** Serializes tool-driven state changes across processes via an atomic mkdir lock. */
+/** Holders are judged by liveness, not age, so a long-running holder is never mistaken for a crashed one. */
+function lockAbandoned(dir: string): boolean {
+  const owner = LockOwnerSchema.safeParse(readJson(join(dir, 'owner.json')));
+  if (owner.success) return !pidAlive(owner.data.pid);
+  try {
+    return Date.now() - statSync(dir).mtimeMs > LOCK_UNOWNED_STALE_MS;
+  } catch {
+    // Released between our mkdir and this stat: free now.
+    return true;
+  }
+}
+
+/**
+ * Removes an abandoned lock dir. Rename is atomic, so of several processes that found the same abandoned
+ * dir exactly one moves it away; a plain rm could delete a lock another process had just re-created.
+ */
+function reclaim(dir: string): void {
+  const tomb = `${dir}.stale-${process.pid}-${Date.now()}`;
+  try {
+    renameSync(dir, tomb);
+  } catch {
+    return;
+  }
+  rmSync(tomb, { recursive: true, force: true });
+}
+
+let tokenCounter = 0;
+
+function tryLock(dir: string): string | undefined {
+  try {
+    mkdirSync(dir);
+  } catch {
+    if (lockAbandoned(dir)) reclaim(dir);
+    return undefined;
+  }
+  tokenCounter += 1;
+  const token = `${process.pid}-${Date.now()}-${tokenCounter}`;
+  writeFileSync(join(dir, 'owner.json'), JSON.stringify({ pid: process.pid, token }));
+  return token;
+}
+
+/** Only the holder removes its lock, so a process that lost its lock can never free someone else's. */
+function unlock(dir: string, token: string): void {
+  const owner = LockOwnerSchema.safeParse(readJson(join(dir, 'owner.json')));
+  if (owner.success && owner.data.token === token) rmSync(dir, { recursive: true, force: true });
+}
+
+/** Serializes tool-driven state changes across processes via an atomic mkdir lock. Held only for bookkeeping, never while gates run. */
 export async function withLock<T>(repo: Repo, fn: () => Promise<T>): Promise<T> {
   ensure(repo.stateDir);
-  const lock = join(repo.stateDir, 'lock');
+  const dir = join(repo.stateDir, 'lock');
   const deadline = Date.now() + LOCK_WAIT_MS;
-  for (;;) {
-    try {
-      mkdirSync(lock);
-      break;
-    } catch {
-      let age: number;
-      try {
-        age = Date.now() - statSync(lock).mtimeMs;
-      } catch {
-        // The holder released the lock between our mkdir and this stat: try again right away
-        // (bounded by the deadline in case mkdir keeps failing for another reason).
-        if (Date.now() > deadline) throw new WgError('Timed out waiting for the workgate lock.');
-        continue;
-      }
-      if (age > LOCK_STALE_MS) {
-        rmSync(lock, { recursive: true, force: true });
-        continue;
-      }
-      if (Date.now() > deadline) throw new WgError('Timed out waiting for the workgate lock.');
-      await sleep(100);
-    }
+  let token = tryLock(dir);
+  while (token === undefined) {
+    if (Date.now() > deadline) throw new WgError('Timed out waiting for the workgate lock.');
+    await sleep(100);
+    token = tryLock(dir);
   }
   try {
     return await fn();
   } finally {
-    rmSync(lock, { recursive: true, force: true });
+    unlock(dir, token);
+  }
+}
+
+/** Runs fn unless another live process runs the same named task (e.g. wg done for one item); never waits. */
+export async function exclusive<T>(repo: Repo, name: string, busy: string, fn: () => Promise<T>): Promise<T> {
+  ensure(repo.stateDir);
+  const dir = join(repo.stateDir, name);
+  // A reclaimed abandoned dir is free on the second try.
+  const token = tryLock(dir) ?? tryLock(dir);
+  if (token === undefined) throw new WgError(busy);
+  try {
+    return await fn();
+  } finally {
+    unlock(dir, token);
   }
 }
 
@@ -214,7 +262,7 @@ export async function withGateSlot<T>(repo: Repo, id: number, options: GateSlotO
         slot = dir;
       } catch {
         if (slotStale(dir)) {
-          rmSync(dir, { recursive: true, force: true });
+          reclaim(dir);
           i--;
         }
       }

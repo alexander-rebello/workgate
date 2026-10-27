@@ -30,7 +30,7 @@ import {
   writeItem,
 } from './items.js';
 import { worktreeRoot } from './repo.js';
-import { clearLease, touchLease, withGateSlot, withLock } from './state.js';
+import { clearLease, exclusive, touchLease, withGateSlot, withLock } from './state.js';
 import type { Item, ItemMeta, Kind, Repo, Severity } from './types.js';
 
 const KIND_TEMPLATES: Record<Kind, string> = {
@@ -533,6 +533,48 @@ async function runGates(repo: Repo, cwd: string, log: string[], progress: (line:
   }
 }
 
+/** Shares the gate slots with wg done and reports waits the same way. */
+async function inGateSlot<T>(repo: Repo, id: number, progress: (line: string) => void, fn: () => Promise<T>): Promise<T> {
+  return withGateSlot(
+    repo,
+    id,
+    {
+      onWait: (holders) => {
+        const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(', ');
+        progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === '' ? '' : `: ${busy}`})...`);
+      },
+      onAbort: killActiveShells,
+    },
+    fn,
+  );
+}
+
+/** Runs the gates in an item's worktree without merging. */
+export async function checkItem(repo: Repo, id: number, progress: (line: string) => void = () => undefined): Promise<string[]> {
+  const item = findItem(loadItems(repo), id);
+  if (item.meta.status !== 'active' || item.meta.branch === undefined) {
+    throw new WgError(`#${id} is ${item.meta.status}; wg check runs the gates of active items only.`);
+  }
+  const info = await worktreeOfBranch(repo, item.meta.branch);
+  if (info === undefined) throw new WgError(`Worktree for #${id} not found.`);
+  if (repo.config.gates.length === 0) return ['No gates configured.'];
+  const log: string[] = [];
+  await inGateSlot(repo, id, progress, () => runGates(repo, info.path, log, progress));
+  log.push('All gates passed.');
+  return log;
+}
+
+function isBookkeepingPath(repo: Repo, path: string): boolean {
+  const c = repo.config;
+  return path.startsWith(`${c.todosDir}/`) || path === c.indexFile || (c.reportFile !== null && path === c.reportFile);
+}
+
+/** Bookkeeping commits (item files, index, report) cannot change gate results, so they need no new gate run. */
+async function movedOnlyByBookkeeping(repo: Repo, base: string): Promise<boolean> {
+  const out = await git(repo.mainRoot, ['diff', '--name-only', base, repo.config.integrationBranch]);
+  return out.split('\n').filter((l) => l !== '').every((path) => isBookkeepingPath(repo, path));
+}
+
 /** Rebasing and gating again when the integration branch moves during the gates; bounded so a busy branch cannot loop forever. */
 const DONE_ATTEMPTS = 3;
 
@@ -564,34 +606,33 @@ export async function doneItem(
   progress: (line: string) => void = () => undefined,
 ): Promise<DoneResult> {
   validateDoneOptions(options);
-  const log: string[] = [];
-  for (let attempt = 1; ; attempt++) {
-    const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
-    if ('item' in prepared) return prepared;
-    if (repo.config.gates.length > 0) {
-      await withGateSlot(
-        repo,
-        id,
-        {
-          onWait: (holders) => {
-            const busy = holders.map((h) => `#${h.id} (${h.minutes}m)`).join(', ');
-            progress(`waiting for a gate slot (${repo.config.gateConcurrency} in use${busy === '' ? '' : `: ${busy}`})...`);
-          },
-          onAbort: killActiveShells,
-        },
-        () => runGates(repo, prepared.worktree, log, progress),
-      );
-    }
-    const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
-    if (finished !== 'moved') return finished;
-    if (attempt >= DONE_ATTEMPTS) {
-      throw new WgError(
-        `${repo.config.integrationBranch} moved during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`,
-      );
-    }
-    log.push(`${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again`);
-    progress(log[log.length - 1] ?? '');
-  }
+  return exclusive(repo, `done-${id}`, `wg done #${id} is already running.`, async () => {
+    const log: string[] = [];
+    // Decisions and errors for items that are not active need no gates, so they never queue for a slot.
+    const needsGates = repo.config.gates.length > 0 && findItem(loadItems(repo), id).meta.status === 'active';
+    const attempts = async (): Promise<DoneResult> => {
+      for (let attempt = 1; ; attempt++) {
+        const prepared = await withLock(repo, () => prepareDone(repo, id, options, log));
+        if ('item' in prepared) return prepared;
+        if (needsGates) await runGates(repo, prepared.worktree, log, progress);
+        const finished = await withLock(repo, () => finishDone(repo, id, options, prepared, log));
+        if (typeof finished !== 'string') return finished;
+        if (attempt >= DONE_ATTEMPTS) {
+          throw new WgError(
+            `${repo.config.integrationBranch} or the worktree of #${id} changed during the gates ${DONE_ATTEMPTS} times. Nothing was merged; run wg done again.`,
+          );
+        }
+        log.push(
+          finished === 'moved'
+            ? `${repo.config.integrationBranch} moved while the gates ran; rebasing and running them again`
+            : `the worktree of #${id} changed while the gates ran; committing and running them again`,
+        );
+        progress(log[log.length - 1] ?? '');
+      }
+    };
+    // The slot is taken before the rebase, so the rebase already sees every merge that finished while this call waited.
+    return needsGates ? inGateSlot(repo, id, progress, attempts) : attempts();
+  });
 }
 
 async function prepareDone(repo: Repo, id: number, options: DoneOptions, log: string[]): Promise<DonePrepared | DoneResult> {
@@ -654,7 +695,7 @@ async function finishDone(
   options: DoneOptions,
   prepared: DonePrepared,
   log: string[],
-): Promise<DoneResult | 'moved'> {
+): Promise<DoneResult | 'moved' | 'changed'> {
   await requireIntegration(repo);
   const items = loadItems(repo);
   const item = findItem(items, id);
@@ -664,10 +705,11 @@ async function finishDone(
   }
   const info = await worktreeOfBranch(repo, branch);
   if (info === undefined) throw new WgError(`Worktree for #${id} disappeared while its gates ran. Nothing was merged.`);
-  if ((await git(repo.mainRoot, ['rev-parse', branch])) !== prepared.head) {
-    throw new WgError(`${branch} got new commits while its gates ran. Nothing was merged; run wg done again.`);
-  }
-  if ((await git(repo.mainRoot, ['rev-parse', repo.config.integrationBranch])) !== prepared.base) return 'moved';
+  const head = await git(repo.mainRoot, ['rev-parse', branch]);
+  // Untracked files count too: worktree remove --force would otherwise delete them unmerged.
+  if (head !== prepared.head || (await git(info.path, ['status', '--porcelain'])) !== '') return 'changed';
+  const base = await git(repo.mainRoot, ['rev-parse', repo.config.integrationBranch]);
+  if (base !== prepared.base && !(await movedOnlyByBookkeeping(repo, prepared.base))) return 'moved';
   if (!(await isCleanTracked(repo.mainRoot))) {
     throw new WgError('The main checkout has uncommitted changes. Commit or stash them, then retry.');
   }
