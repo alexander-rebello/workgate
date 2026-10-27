@@ -12551,25 +12551,38 @@ function run(command, args, cwd) {
   });
 }
 var activeShells = /* @__PURE__ */ new Set();
-function killActiveShells() {
-  for (const pid of activeShells) {
-    try {
-      process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
-    } catch {
-    }
+function killGroup(pid) {
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
+  } catch {
   }
+}
+function killActiveShells() {
+  for (const pid of activeShells) killGroup(pid);
   activeShells.clear();
 }
-function runShell(command, cwd) {
+function runShell(command, cwd, options = {}) {
   return new Promise((resolve3) => {
     const child = spawn(command, { cwd, shell: true, env: process.env, detached: process.platform !== "win32" });
     if (child.pid !== void 0) activeShells.add(child.pid);
-    const forget = () => {
-      if (child.pid !== void 0) activeShells.delete(child.pid);
-    };
     let output2 = "";
     let stdout = "";
     let stderr = "";
+    let settled = false;
+    let timer;
+    const finish = (result, timedOut = false) => {
+      if (settled) return;
+      settled = true;
+      if (timer !== void 0) clearTimeout(timer);
+      if (child.pid !== void 0) activeShells.delete(child.pid);
+      resolve3({ ...result, timedOut });
+    };
+    if (options.timeoutMs !== void 0) {
+      timer = setTimeout(() => {
+        if (child.pid !== void 0) killGroup(child.pid);
+        finish({ code: 1, stdout, stderr, output: output2 }, true);
+      }, options.timeoutMs);
+    }
     child.stdout.on("data", (chunk) => {
       const text = chunk.toString("utf8");
       output2 += text;
@@ -12580,13 +12593,13 @@ function runShell(command, cwd) {
       output2 += text;
       stderr += text;
     });
+    child.stdin.on("error", () => void 0);
+    child.stdin.end(options.input ?? "");
     child.on("error", (error62) => {
-      forget();
-      resolve3({ code: 1, stdout, stderr: error62.message, output: error62.message });
+      finish({ code: 1, stdout, stderr: error62.message, output: error62.message });
     });
     child.on("close", (code) => {
-      forget();
-      resolve3({ code: code ?? 1, stdout, stderr, output: output2 });
+      finish({ code: code ?? 1, stdout, stderr, output: output2 });
     });
   });
 }
@@ -32693,6 +32706,8 @@ var STATUSES = ["todo", "active", "blocked", "done", "dropped"];
 var KINDS = ["bug", "feature", "rework", "decision"];
 var SEVERITIES = ["S1", "S2", "S3", "S4"];
 var itemId = external_exports.number().int().positive();
+var REF_KEY = /^[a-z][a-z0-9-]*$/;
+var EVENTS = ["add", "claim", "block", "done", "drop"];
 var ItemMetaSchema = external_exports.object({
   id: itemId,
   title: external_exports.string().min(1),
@@ -32707,6 +32722,8 @@ var ItemMetaSchema = external_exports.object({
   needs: external_exports.string().min(1).optional(),
   after: external_exports.array(itemId).optional(),
   parent: itemId.optional(),
+  /** Links to external trackers, e.g. { taiga: "ERP-12" }. */
+  refs: external_exports.record(external_exports.string().regex(REF_KEY), external_exports.string().min(1)).optional(),
   verified: external_exports.boolean().optional(),
   outcome: external_exports.string().min(1).optional(),
   report: external_exports.string().min(1).optional(),
@@ -32740,6 +32757,11 @@ var GateSchema = external_exports.object({
   name: external_exports.string().min(1),
   command: external_exports.string().min(1)
 });
+var EventHookSchema = external_exports.object({
+  on: external_exports.array(external_exports.enum(EVENTS)).min(1),
+  command: external_exports.string().min(1),
+  timeoutSeconds: external_exports.number().int().positive().default(30)
+});
 var AttestationSchema = external_exports.object({
   name: external_exports.string().min(1).regex(/^[a-z][a-z0-9-]*$/),
   description: external_exports.string().min(1),
@@ -32763,7 +32785,8 @@ var ConfigSchema = external_exports.object({
   gateConcurrency: external_exports.number().int().positive().default(1),
   /** How long `wg done` waits for a free gate slot before giving up without merging. */
   gateWaitMinutes: external_exports.number().positive().default(8),
-  attestations: external_exports.array(AttestationSchema).default([])
+  attestations: external_exports.array(AttestationSchema).default([]),
+  hooks: external_exports.array(EventHookSchema).default([])
 }).strict();
 
 // src/items.ts
@@ -32781,6 +32804,7 @@ var KEY_ORDER = [
   "needs",
   "after",
   "parent",
+  "refs",
   "verified",
   "outcome",
   "report",
@@ -32974,6 +32998,20 @@ Todo: #${id}`
     );
     return `Recorded the bypass as #${id}.`;
   });
+}
+
+// src/events.ts
+async function fireEvent(repo, event, item) {
+  const input2 = JSON.stringify({ event, item: { ...item.meta, file: item.file } });
+  let output2 = "";
+  const warnings = [];
+  for (const hook of repo.config.hooks.filter((h) => h.on.includes(event))) {
+    const result = await runShell(hook.command, repo.mainRoot, { input: input2, timeoutMs: hook.timeoutSeconds * 1e3 });
+    output2 += result.stdout;
+    if (result.timedOut) warnings.push(`hook "${hook.command}" timed out after ${hook.timeoutSeconds}s and was killed`);
+    else if (result.code !== 0) warnings.push(`hook "${hook.command}" exited with code ${result.code}: ${result.stderr.trim()}`);
+  }
+  return { output: output2, warnings };
 }
 
 // src/stdin.ts
@@ -33543,7 +33581,8 @@ async function addItem(repo, options) {
       ...options.sev === void 0 ? {} : { sev: options.sev },
       ...needs === void 0 ? {} : { needs },
       ...options.after === void 0 || options.after.length === 0 ? {} : { after: options.after },
-      ...options.parent === void 0 ? {} : { parent: options.parent }
+      ...options.parent === void 0 ? {} : { parent: options.parent },
+      ...options.refs === void 0 || Object.keys(options.refs).length === 0 ? {} : { refs: options.refs }
     };
     const body = options.body !== void 0 && options.body.trim() !== "" ? options.body : KIND_TEMPLATES[options.kind];
     const item = createItem(repo, meta3, body);
@@ -34530,8 +34569,25 @@ function collectAttestReason(value, previous) {
   if (eq <= 0) throw new InvalidArgumentError("Expected name=reason.");
   return { ...previous, [value.slice(0, eq)]: value.slice(eq + 1) };
 }
+function collectRef(value, previous) {
+  const eq = value.indexOf("=");
+  const key = eq < 0 ? value : value.slice(0, eq);
+  const val = eq < 0 ? "" : value.slice(eq + 1);
+  if (!REF_KEY.test(key)) throw new InvalidArgumentError("Ref names are lowercase letters, digits and dashes, starting with a letter.");
+  if (val === "") throw new InvalidArgumentError("Expected name=value with a non-empty value.");
+  return { ...previous, [key]: val };
+}
 function print(text) {
   process.stdout.write(`${text}
+`);
+}
+async function emit(repo, event, id, json2) {
+  if (!repo.config.hooks.some((h) => h.on.includes(event))) return;
+  const item = findItem(loadItems(repo), id);
+  const { output: output2, warnings } = await fireEvent(repo, event, item);
+  if (output2 !== "") (json2 ? process.stderr : process.stdout).write(output2.endsWith("\n") ? output2 : `${output2}
+`);
+  for (const w of warnings) process.stderr.write(`warning: ${w}
 `);
 }
 function summary(repo, item) {
@@ -34567,12 +34623,22 @@ program2.command("init").description("Set up workgate in the current repository"
   const log = await initRepo(process.cwd(), { branch: opts.branch, claudeMd: opts.claudeMd === true, commit: opts.commit });
   for (const line2 of log) print(line2);
 });
-program2.command("add").description("Create a work item").argument("<title>").addOption(new Option("--kind <kind>", "bug | feature | rework | decision").choices(KINDS).makeOptionMandatory()).addOption(new Option("--sev <sev>", "severity for bugs").choices(SEVERITIES)).option("--body <text>", "item body; otherwise read from stdin (default: a template for the kind)").option("--after <ids>", "comma-separated ids this item depends on", parseIds).option("--parent <id>", "parent item id", parseId).option("--needs <text>", "create the item blocked, stating what the owner must provide").option("--json", "machine-readable output").action(
+program2.command("add").description("Create a work item").argument("<title>").addOption(new Option("--kind <kind>", "bug | feature | rework | decision").choices(KINDS).makeOptionMandatory()).addOption(new Option("--sev <sev>", "severity for bugs").choices(SEVERITIES)).option("--body <text>", "item body; otherwise read from stdin (default: a template for the kind)").option("--after <ids>", "comma-separated ids this item depends on", parseIds).option("--parent <id>", "parent item id", parseId).option("--needs <text>", "create the item blocked, stating what the owner must provide").option("--ref <name=value>", "link to an external tracker, e.g. taiga=ERP-12 (repeatable)", collectRef, {}).option("--json", "machine-readable output").action(
   async (title, opts) => {
     const repo = await repoForCwd();
     const body = opts.body ?? (process.stdin.isTTY ? void 0 : await readStdin());
-    const item = await addItem(repo, { title, kind: opts.kind, sev: opts.sev, body, after: opts.after, parent: opts.parent, needs: opts.needs });
+    const item = await addItem(repo, {
+      title,
+      kind: opts.kind,
+      sev: opts.sev,
+      body,
+      after: opts.after,
+      parent: opts.parent,
+      needs: opts.needs,
+      refs: opts.ref
+    });
     print(opts.json === true ? JSON.stringify(jsonItem(repo, item)) : `Created #${item.meta.id} (${item.meta.status}): ${item.file}`);
+    await emit(repo, "add", item.meta.id, opts.json === true);
   }
 );
 program2.command("list").description("List items (open ones by default)").addOption(new Option("--status <status...>", "filter by status").choices(STATUSES)).addOption(new Option("--kind <kind>", "filter by kind").choices(KINDS)).option("--text <text>", "case-insensitive search in title and body").option("--all", "include done and dropped items").option("--json", "machine-readable output").action((opts) => listAction(opts));
@@ -34608,6 +34674,7 @@ program2.command("show").description("Show one item").argument("<id>", "item id"
   }
   print(summary(repo, item));
   print(`file: ${item.file}`);
+  for (const [name, value] of Object.entries(item.meta.refs ?? {})) print(`ref ${name}: ${value}`);
   if (item.body !== "") print(`
 ${item.body}`);
 });
@@ -34639,6 +34706,7 @@ function printClaim(result, json2, repo) {
 program2.command("claim").description("Start work on a todo item: creates its branch and worktree").argument("<id>", "item id", parseId).option("--json", "machine-readable output").action(async (id, opts) => {
   const repo = await repoForCwd();
   printClaim(await claimItem(repo, id), opts.json, repo);
+  await emit(repo, "claim", id, opts.json === true);
 });
 program2.command("resume").description("Re-attach to an active item (for example after an interrupted session)").argument("<id>", "item id", parseId).option("--json", "machine-readable output").action(async (id, opts) => {
   const repo = await repoForCwd();
@@ -34651,16 +34719,20 @@ program2.command("release").description("Return an active item to todo (the work
   print(`Released #${id}.`);
 });
 program2.command("block").description("Mark an item as waiting on the owner").argument("<id>", "item id", parseId).requiredOption("--needs <text>", "exactly what the owner must provide").action(async (id, opts) => {
-  await blockItem(await repoForCwd(), id, opts.needs);
+  const repo = await repoForCwd();
+  await blockItem(repo, id, opts.needs);
   print(`Blocked #${id}.`);
+  await emit(repo, "block", id, false);
 });
 program2.command("unblock").description("Record the owner answer and resume the item").argument("<id>", "item id", parseId).argument("[answer]", "the answer, appended to the item body").action(async (id, answer) => {
   const item = await unblockItem(await repoForCwd(), id, answer);
   print(`#${id} is now ${item.meta.status}.`);
 });
 program2.command("drop").description("Close an item without doing it").argument("<id>", "item id", parseId).requiredOption("--reason <text>").option("--force", "discard unmerged commits").action(async (id, opts) => {
-  await dropItem(await repoForCwd(), id, opts.reason, opts.force === true);
+  const repo = await repoForCwd();
+  await dropItem(repo, id, opts.reason, opts.force === true);
   print(`Dropped #${id}.`);
+  await emit(repo, "drop", id, false);
 });
 program2.command("verify").description("Mark a done item as verified by the owner").argument("<id>", "item id", parseId).action(async (id) => {
   await verifyItem(await repoForCwd(), id);
@@ -34742,6 +34814,7 @@ program2.command("done").description("Rebase, run gates, merge into the integrat
 `));
   for (const line2 of result.log) print(line2);
   print(`Done #${itemId2}.`);
+  await emit(repo, "done", itemId2, false);
 });
 program2.command("doctor").description("Validate item files, worktrees and branches").option("--fix", "regenerate the index").action(async (opts) => {
   const repo = await repoForCwd();
